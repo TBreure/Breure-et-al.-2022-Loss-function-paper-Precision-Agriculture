@@ -110,10 +110,9 @@ intgr_AvailK <- function (S_v,sig,FE_v) {
 
 ```
 
-# Compute the optimum fertilizer under uncertainty
-
 ```{r, echo = F, warning=F}
 
+# Compute the optimum fertilizer under uncertainty
 # Equation 11
 r_intgr_K <- function (mean_Sv, S, sig_v){
 
