@@ -2,9 +2,6 @@
 
 ```{r, echo = F, warning = F}
 
-# setwd("D:/OneDrive - Rothamsted Research/Manuscripts/Loss function")
-# setwd("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Calibration")
-
 rm(list = ls())
 gc()
 
@@ -12,7 +9,6 @@ library(tidyverse)
 library(viridis)
 
 theme_set(theme_bw())
-
 
 ```
 
@@ -209,14 +205,14 @@ L_df <- do.call(rbind, lapply(1:length(test_out_K),
 
 # Create long data frame and plot
 rbind(P_df, L_df) %>% 
-  ggplot(.,aes(n,value,col=Nutrient_content,group=Gr_v))+
-  geom_line()+
-  xlab(expression(paste(K[2],O[5]," applied / kg ",ha^-1)))+
-  ylab("Pounds / £")+
-  facet_wrap(~ID,
-             scales="free_y")+
-  labs(col = expression(paste("Soil K / mg ",kg^-1)))+
-  scale_color_gradientn(colors = viridis::viridis(nrow(test_df_K)))
+  ggplot(.,aes(n,value, col=Nutrient_content,group=Gr_v))+
+    geom_line()+
+    xlab(expression(paste(K[2],O[5]," applied / kg ",ha^-1)))+
+    ylab("Pounds / £")+
+    facet_wrap(~ID,
+              scales="free_y")+
+    labs(col = expression(paste("Soil K / mg ",kg^-1)))+
+    scale_color_gradientn(colors = viridis::viridis(nrow(test_df_K)))
 
 
 ```
