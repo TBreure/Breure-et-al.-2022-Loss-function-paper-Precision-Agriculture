@@ -1,0 +1,223 @@
+# Workeable example (with synthetic dataset) of the code that was used for the loss function script
+
+```{r, echo = F, warning = F}
+
+# setwd("D:/OneDrive - Rothamsted Research/Manuscripts/Loss function")
+# setwd("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Calibration")
+
+rm(list = ls())
+gc()
+
+library(tidyverse)
+library(viridis)
+
+theme_set(theme_bw())
+
+
+```
+
+# Synthetic dataset, soil potassium
+
+```{r, echo = F, warning = F}
+
+par(mfrow = c(1,1))
+
+
+# Create basic dataframe containing mean prediction and variance (constant)
+test_df_K <- data.frame(meanK = c(100, 150, 200, 250, 300,
+                                  350, 400, 500, 550, 600),
+                      krigVar = c(rep(50,10)))
+
+
+```
+
+# Expected loss given the normally distributed error
+
+```{r, echo = F, warning = F}
+
+f_Avail_K <- function (mean_Sv, sig_v, S,n, FE){
+
+  BER=0.29/90;
+  
+  #A = 373.64;
+  #B = -374.37;
+  #C = -3.52;
+  #R = 0.98;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  
+  
+  sig=sig_v;
+  meanS=mean_Sv;
+  
+  #OPtimum N (fertilizer to apply) (Equation 10)
+  N0=(log((BER/0.52-C)/(R^S*B*log(R)))/(0.52*log(R)));
+  
+  # Profit under F0 (Equation 9)
+  Profit=(A+B*R^((0.52*N0)+S)+C*((0.52*N0)+S))*90-(0.29*N0);
+  
+  # We estimate the expected loss (Equation 12) 
+  y=(Profit-((A+B*R^((0.52*FE)+S)+C*((0.52*FE)+S))*90-0.29*FE))*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)));
+  
+  y
+
+
+  }
+
+
+```
+
+# Integrate over the expected loss
+
+```{r, echo = F, warning = F}
+
+# Integration of the function f_avail_K()
+intgr_AvailK <- function (S_v,sig,FE_v) {
+
+  BER=0.29/90;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  
+  #let S=10 for example
+  S=S_v;
+  
+  #OPtimum N
+  N0=log((BER/0.52-C)/(R^S*B*log(R)))/(0.52*log(R)); 
+  
+  N0 <- ifelse(N0 > 225, 225, N0)
+  
+  N0 <- ifelse(N0 < 0, 0, N0)
+  
+  N=0:225;
+  
+  Profit=(A+B*R^((0.52*N)+S)+C*((0.52*N)+S))*90-(0.29*N);
+  
+  N0Profit=(A+B*R^((0.52*N0)+S)+C*((0.52*N0)+S))*90-(0.29*N0);
+  
+  
+  L=((A+B*R^((0.52*N0)+S)+C*((0.52*N0)+S))*90-0.29*N0)-Profit;
+  
+  q = integrate(f_Avail_K,0,1000, mean_Sv = S, sig_v = sig, FE = FE_v);
+  out1 <- q$value
+  out2 <- q$abs.error
+  out3 <- N
+  
+  return(list(Profit, L, out1, out2,out3, N0, N0Profit))
+
+  }
+
+```
+
+# Compute the optimum fertilizer under uncertainty
+
+```{r, echo = F, warning=F}
+
+# Equation 11
+r_intgr_K <- function (mean_Sv, S, sig_v){
+
+  R = 0.98;
+  meanS = mean_Sv;
+  sig = sig_v;
+  
+  y <- (R^S)*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)))
+  
+  return(y)
+  }
+
+  # Integration
+  opt_L_f_K <- function (S_v, sig){
+  
+    BER=0.29/90;
+  
+    #A = 373.64;
+    #B = -374.37;
+    #C = -3.52;
+    #R = 0.98;
+    
+    A = 63.3;
+    B = -63.3;
+    C = 0;
+    R = 0.98;
+  
+    #sig = sig;
+    #sig_v = sig;
+    tmp_v <- integrate(r_intgr_K,0,1000,
+                       mean_Sv = S_v,
+                       sig_v=sig)
+    
+    opt_L_N = log((BER/0.52-C)/(B*log(R)*tmp_v$value))/(0.52*log(R))
+    
+    # Constrain the fertilizer application rate 0 < Fopt < 225
+    # check whether > 225
+    opt_LN_kg_f2 <- ifelse(opt_L_N > 225, 225, opt_L_N)
+    
+    # check whether < 0
+    opt_LN_kg_f3 <- ifelse(opt_LN_kg_f2 < 0, 0, opt_LN_kg_f2)
+      
+    return(opt_LN_kg_f3)
+  
+    }
+
+
+  K_opt_out <- lapply(1:nrow(test_df_K),
+                    function (x)
+                      opt_L_f_K(S_v = test_df_K[x,c("meanK")],
+                              sig = sqrt(test_df_K[x,c("krigVar")])))
+
+
+
+```
+
+# Apply loss function to synthetic data frame
+
+```{r, echo=F, warning=F}
+
+# lapply to intgr_AvailK function on data frame (with fixed (small) kriging variance of 50)
+test_out_K <- lapply(1:nrow(test_df_K),
+                   function (x)
+                   intgr_AvailK(test_df_K[x,c("meanK")],
+                                sqrt(test_df_K[x,c("krigVar")]),
+                                FE_v = K_opt_out[[x]]))
+
+
+# Profit dataframe
+P_df <- do.call(rbind, lapply(1:length(test_out_K),
+                function (x)
+                  data.frame(value = test_out_K[[x]][[1]],
+                             n = c(0:225),
+                             Sig_value = test_df_K[x,c("krigVar")],
+                             Nutrient_content = test_df_K[x,c("meanK")],
+                             Gr_v = as.integer(round(test_df_K[x, c("meanK")],1)),
+                             ID = c("Profit"))))
+
+# Loss dataframe
+L_df <- do.call(rbind, lapply(1:length(test_out_K),
+                function (x)
+                  data.frame(value = test_out_K[[x]][[2]],
+                             n = c(0:225),
+                             Sig_value = test_df_K[x,c("krigVar")],
+                             Nutrient_content = test_df_K[x,c("meanK")],
+                             Gr_v = as.integer(round(test_df_K[x, c("meanK")],1)),
+                             ID = c("Loss"))))
+
+
+# Create long data frame and plot
+rbind(P_df, L_df) %>% 
+  ggplot(.,aes(n,value,col=Nutrient_content,group=Gr_v))+
+  geom_line()+
+  xlab(expression(paste(K[2],O[5]," applied / kg ",ha^-1)))+
+  ylab("Pounds / £")+
+  facet_wrap(~ID,
+             scales="free_y")+
+  labs(col = expression(paste("Soil K / mg ",kg^-1)))+
+  scale_color_gradientn(colors = viridis::viridis(nrow(test_df_K)))
+
+
+```
+
