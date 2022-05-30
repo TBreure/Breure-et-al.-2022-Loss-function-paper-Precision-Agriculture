@@ -1,0 +1,3447 @@
+---
+  title: "Manuscript 3 - Loss function paper"
+header-includes:
+  - \usepackage{graphicx}
+- \usepackage{float}
+output: pdf_document
+pdf_document:
+  fig_caption: yes
+fig_crop: no
+highlight: haddock
+keep_tex: yes
+number_sections: yes
+word_document:
+  toc: yes
+theme: journal
+toc_depth: 2
+---
+
+
+
+```{r setup, include=FALSE, message=FALSE}
+
+
+library(knitr)
+opts_chunk$set(external=TRUE,
+               echo=FALSE,
+               warning=FALSE,
+               )
+
+
+# LIBRARIES -----------------------------------------------------------
+library(raster)
+library(geoR)
+library(georob)
+library(rgdal)
+library(prospectr)
+library(pls)
+library(tidyverse)
+library(cowplot)
+library(sf)
+library(raster)
+
+theme_set(theme_bw())
+
+gc()
+rm(list = ls())
+# closeAllConnections()
+
+
+```  
+
+## READ IN DATA
+
+```{r, echo = FALSE, warning = FALSE}
+# Reading in the data
+gc()
+rm(list = ls())
+setwd("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Calibration")
+
+# WET CHEMISTRY -----------------------------------------------------------
+
+WetCh_nm <- list("Wet_Chem_P", "Wet_Chem_ST", "Wet_Chem_T2", "Wet_Chem_K6")
+
+WetCh_l <- lapply(1:length(WetCh_nm),
+                  function (z)
+                    read.table(paste(WetCh_nm[[z]],
+                                     ".txt",
+                                     sep = ""),
+                               header = T,
+                               sep = '\t'))
+
+SubCh_l <- vector("list",length  = length(WetCh_l))
+
+for(i in 1:length(WetCh_l)){
+  SubCh_l[[i]] <- WetCh_l[[i]] %>% 
+    dplyr::select(.,
+                  ID = ID,
+                  "CALCIUM" = M_Ca,
+                  "MAGNESIUM" = M_Mg,
+                  "SODIUM" = M_Na,
+                  "SULPHUR" = M_S,
+                  "CARBON" = M_C,
+                  "NITROGEN" = M_N,
+                  "PH" = pH,
+                  "P_OLSEN" = PO4_ppm,
+                  "K_NITRATE" = M_K,
+                  "CLAY" = Clay_perc9,
+                  "SAND" = Sand_perc,
+                  "SILT" = Silt_perc9)
+}
+
+f_names <- c("Field_1", "Field_2", "Field_3", "Field_4")
+
+
+# ---------------------------------------------------------------------------------- Spectral data 
+#-----------------------------------------------------------------------------------
+
+# Read data
+Spc <- list(list("GR_MIR.txt", "GR_MIR_ST.txt",
+                 "GR_MIR_T2.txt","GR_MIR_K6.txt"),
+            list("GR_NIR.txt", "GR_NIR_ST.txt",
+                 "GR_NIR_T2.txt","GR_NIR_K6.txt"))
+
+# Read tables
+Spc_df <- lapply(1:length(Spc), 
+                 function (z) lapply(1:length(Spc[[z]]), 
+                                     function (s) read.table(Spc[[z]][[s]],
+                                                             header = T,
+                                                             check.names = F,
+                                                             sep = '\t')))
+
+# Write spectra as sub-dataframe (if all wavebands are retained!)
+# Only works if not any other columns have a numeric value as header
+spc_subdf <- function(df){
+  spc <- as.matrix(df[,8:ncol(df)])
+  df <- df[,-c(8:ncol(df))]
+  df$spc <- spc
+  return(df)
+}
+
+Spcdf <- lapply(1:length(Spc_df), 
+                function (z) 
+                  lapply(1:length(Spc_df[[z]]),
+                         function (s) 
+                           spc_subdf(Spc_df[[z]][[s]])
+                  )
+)
+
+FTIR_spc_proc <- function(df){
+  df$sg <- prospectr::savitzkyGolay(df$spc, p = 3, w = 11, m = 0)
+  df$snv <- prospectr::standardNormalVariate(X = df$sg)
+  df$d1 <- t(diff(t(df$sg), differences = 1))
+  df$d2 <- t(diff(t(df$sg), differences = 2))
+  df$gapD1 <- gapDer(X = df$sg, m = 1, w = 11, s = 8)
+  return(df)
+}
+
+NIR_spc_proc <- function(df){
+  df$spcNIR <- df$spc
+  df$sgNIR <- savitzkyGolay(df$spc, p = 3, w = 11, m = 0)
+  df$snvNIR <- standardNormalVariate(X = df$sg)
+  df$d1 <- t(diff(t(df$sg), differences = 1))
+  df$d2 <- t(diff(t(df$sg), differences = 2))
+  df$gapD1NIR <- gapDer(X = df$sg, m = 1, w = 11, s=31)
+  return(df)
+}
+
+prc_list <- list(FTIR_spc_proc,NIR_spc_proc)
+
+Spcdf <- lapply(1:length(prc_list),
+                function (s)
+                  lapply(1:length(Spcdf[[s]]),
+                         function (z)
+                           prc_list[[s]](Spcdf[[s]][[z]])))
+
+```
+# Pre-processing of NIR/MIR spectra
+
+```{r, echo = F, warnig = F}
+# Two different remove band functions due to different names for the spectral 
+# matrices
+removebands_FTIR <- function(df,uplim,lolim){
+  df$spc <- df$spc[,c((colnames(df$spc) > uplim | colnames(df$spc) < lolim))]
+  df$sg <- df$sg[,c((colnames(df$sg) > uplim | colnames(df$sg) < lolim))]
+  df$snv <- df$snv[,c((colnames(df$snv) > uplim | colnames(df$snv) < lolim))]
+  df$d1 <- df$d1[,c((colnames(df$d1) > uplim | colnames(df$d1) < lolim))]
+  df$d2 <- df$d2[,c((colnames(df$d2) > uplim | colnames(df$d2) < lolim))]
+  df$gapD1 <- df$gapD1[,c((colnames(df$gapD1) > uplim | colnames(df$gapD1) < lolim))]
+  return(df)
+}
+
+removebands_NIR <- function(df,uplim,lolim){
+  df$spcNIR <- df$spcNIR[,c((colnames(df$spcNIR) > uplim | colnames(df$spcNIR) < lolim))]
+  df$sgNIR <- df$sgNIR[,c((colnames(df$sgNIR) > uplim | colnames(df$sgNIR) < lolim))]
+  df$snvNIR <- df$snvNIR[,c((colnames(df$snvNIR) > uplim | colnames(df$snvNIR) < lolim))]
+  df$d1 <- df$d1[,c((colnames(df$d1) > uplim | colnames(df$d1) < lolim))]
+  df$d2 <- df$d2[,c((colnames(df$d2) > uplim | colnames(df$d2) < lolim))]
+  df$gapD1NIR <- df$gapD1NIR[,c((colnames(df$gapD1NIR) > uplim | colnames(df$gapD1NIR) < lolim))]
+  return(df)
+}
+
+
+# Check before
+dim(Spcdf[[1]][[1]]$gapD1)
+
+bands_h <- 2430
+bands_l <- 2240
+# Remove bands for FTIR
+for(i in 1:length(Spcdf[[1]])){
+  Spcdf[[1]][[i]] <- removebands_FTIR(Spcdf[[1]][[i]],
+                                      bands_h,
+                                      bands_l)
+}
+
+dim(Spcdf[[1]][[1]]$gapD1) # and after
+
+
+dim(Spcdf[[2]][[1]]$gapD1NIR) # check before
+
+bands_h <- list(7900,5587)
+bands_l <- list(6849,5102)
+
+for (j in 1:length(Spcdf[[2]])){
+  for (t in 1:2){
+    Spcdf[[2]][[j]] <- removebands_NIR(Spcdf[[2]][[j]],
+                                       bands_h[[t]],
+                                       bands_l[[t]])
+  }
+}
+
+dim(Spcdf[[2]][[1]]$gapD1NIR) # and after
+
+# set std color
+stdcol = rgb(red = .8, green = .1, blue = .3, alpha = .5)
+
+quick_matplt <- function(df,xlab,ylab,main,col){
+  tempplt <- matplot(as.numeric(colnames(df)),
+                     t(df),
+                     type = "l",
+                     lty = 1,
+                     xlab = xlab,
+                     ylab = ylab,
+                     col = col,
+                     xlim = rev(range(as.numeric(colnames(df)))),
+                     main = main)
+  grid()
+  return(tempplt)
+}
+
+par(mfrow = c(2,2))
+Spcplt <- lapply(1:length(Spcdf), 
+                 function (z)
+                   lapply(1:length(Spcdf[[z]]),
+                          function (s)
+                            quick_matplt(Spcdf[[z]][[s]]$sg,
+                                         "Wavenumber / cm",
+                                         "-",
+                                         "-",
+                                         stdcol)))
+par(mfrow = c(1,1))
+
+
+# Merge NIR/MIR datasets for each field and sample processing dataset
+NIRMIR <- vector("list")
+for (i in 1:length(Spcdf[[1]])){
+  NIRMIR[[i]] <- merge(Spcdf[[1]][[i]],
+                       Spcdf[[2]][[i]][,c("ID",
+                                          "spcNIR",
+                                          "sgNIR",
+                                          "snvNIR",
+                                          "gapD1NIR")],
+                       by = c("ID")
+  )
+}
+
+
+for (i in 1:length(NIRMIR)){
+  NIRMIR[[i]]$snv_merg <- cbind(NIRMIR[[i]]$snvNIR,NIRMIR[[i]]$snv)
+  NIRMIR[[i]]$d1_merg <- cbind(NIRMIR[[i]]$gapD1NIR,NIRMIR[[i]]$gapD1)
+}
+
+# Merge with wet chem 
+NIRMIR_cal <- vector("list")
+for (i in 1:length(NIRMIR)){
+  NIRMIR_cal[[i]] <- merge(NIRMIR[[i]],
+                           SubCh_l[[i]],
+                           by = c("ID"))
+}
+
+# Correct factor value
+NIRMIR_cal[[3]]$Field <- c("F3")
+NIRMIR_cal[[4]]$Field <- c("F4")
+
+# Repeat merged Field 1 and Field 2
+NIRMIR_cal2 <- list(rbind(NIRMIR_cal[[1]],NIRMIR_cal[[2]]),
+                    rbind(NIRMIR_cal[[1]],NIRMIR_cal[[2]]),
+                    NIRMIR_cal[[3]],NIRMIR_cal[[4]])
+
+
+```
+# Read XRF Data
+
+```{r, echo = FALSE, warning = FALSE}
+
+XRFSpec <- list("XRF_GR_F1.txt", "XRF_GR_F2.txt", 
+                "XRF_GR_F3.txt", "XRF_GR_F4.txt")
+
+
+XRFSpec <- lapply(1:length(XRFSpec), 
+                  function (z) 
+                    read.table(XRFSpec[[z]],
+                               header = T,
+                               check.names = F,
+                               sep = '\t'))
+
+# Write spectra as sub dataframe
+spc_subdfXRF <- function(df){
+  spc <- as.matrix(df[,3:ncol(df)])
+  df <- df[,-c(3:ncol(df))]
+  df$XRFspc <- spc
+  return(df)
+}
+
+XRFSpcdf <- lapply(1:length(XRFSpec), 
+                   function(z) 
+                     spc_subdfXRF(XRFSpec[[z]]
+                     ))
+
+
+spc_filterXRF <- function(df){
+  df$XRFsg <- prospectr::savitzkyGolay(df$XRFspc, p = 3, w = 7, m = 0)
+  df$XRFsnv <- prospectr::standardNormalVariate(X = df$XRFsg)
+  df$XRFgapD1 <- gapDer(X = df$XRFspc, m = 1, w = 11, s = 4)
+  return(df)
+}
+
+XRFSpcdf <- lapply(1:length(XRFSpcdf), 
+                   function(z) 
+                     spc_filterXRF(XRFSpcdf[[z]]
+                     )
+                   )
+
+# Merge Wet Chem
+XRFSpc2 <- lapply(1:(length(XRFSpcdf)), 
+                  function (z) 
+                    merge(XRFSpcdf[[z]], 
+                          SubCh_l[[z]], by = c("ID")))
+
+NIRMIRXRF_cal <- vector("list", 4)
+for (i in 1:length(NIRMIR_cal)) {
+  NIRMIRXRF_cal[[i]] <- merge(NIRMIR_cal[[i]],
+                              XRFSpc2[[i]][,c("ID","Field",
+                                              "XRFspc","XRFsg",
+                                              "XRFsnv","XRFgapD1")],
+                              by = c("ID","Field"))
+  
+}
+
+
+# Compute the same for a list where field 1 and field 2 have been combined (due to their geographical proximity)
+XRF_cal2 <- list(rbind(XRFSpc2[[1]],XRFSpc2[[2]]),
+                 rbind(XRFSpc2[[1]],XRFSpc2[[2]]),
+                 XRFSpc2[[3]],XRFSpc2[[4]])
+
+
+NIRMIRXRF_cal3 <- vector("list", 4)
+for (i in 1:length(NIRMIR_cal2)) {
+  NIRMIRXRF_cal3[[i]] <- merge(NIRMIR_cal2[[i]],
+                               XRF_cal2[[i]][,c("ID","Field",
+                                                "XRFspc","XRFsg",
+                                                "XRFsnv","XRFgapD1")],
+                               by = c("ID","Field"))
+  
+}
+
+
+NIRMIRXRF <- vector("list", length(NIRMIR))
+for (i in 1:length(NIRMIR)){
+  NIRMIRXRF[[i]] <- merge(NIRMIR[[i]],
+                          XRFSpcdf[[i]][,c("ID","XRFspc","XRFsg",
+                                           "XRFsnv","XRFgapD1")],
+                          by = c("ID"))
+}
+
+
+```
+
+# Calibration and model averaging of NIR/MIR/XRF PLS predictions
+
+```{r, echo = FALSE, warning = FALSE}
+# Rename column variables
+
+# Two fields
+var_l <- c("K (mg/kg)", "P (mg/kg)") 
+var_ll <- rep(c("K_NITRATE","P_OLSEN"),
+              length(NIRMIRXRF_cal3))
+var_ll5 <- c("K_NITRATE", "P_OLSEN")
+var_l2 <- rep(var_l,length(NIRMIRXRF_cal3))
+
+
+# Repeat each df in list var_l times
+NIRMIRXRF_cal2 <- rep(NIRMIRXRF_cal3, each = length(var_l))
+
+NIRMIRXRF_cal6 <- rep(NIRMIRXRF_cal, each = length(var_l))
+
+
+# For loop to run PLSR for each spectral matrix and soil property across all fields
+
+library(parallelMap)
+library(parallel)
+parallelStartSocket(parallel::detectCores())
+
+spc_matrix_list <- list(c("spcNIR","spc","XRFspc"),
+                        c("sgNIR","sg","XRFsg"),
+                        c("snvNIR","snv","XRFsnv"),
+                        c("gapD1NIR","gapD1","XRFgapD1"))
+
+
+OLS_Results_list <- vector("list", length(spc_matrix_list))
+Pred_train_df_l2_list <- vector("list", length(spc_matrix_list))
+Pred_df_l2_list <- vector("list", length(spc_matrix_list))
+GR_SP_l_list <- vector("list", length(spc_matrix_list))
+GR_SP_train_l_list <- vector("list", length(spc_matrix_list))
+Resid_out_list <- vector("list", length(spc_matrix_list))
+
+for (t in 1:length(spc_matrix_list)) {
+  
+  spc_m_out <- vector("list", 
+                      length(spc_matrix_list[[t]])) # Predicted data frames out
+  pls_m_out <- vector("list", 
+                      length(spc_matrix_list[[t]])) # PLS models out
+  OneSig_m_out <- vector("list", 
+                         length(spc_matrix_list[[t]])) # Selected components out
+  minPls_m_out <- vector("list", 
+                         length(spc_matrix_list[[t]])) # min Pls out
+  
+  
+  for (ii in spc_matrix_list[[t]]){
+    
+    Pls_l <- lapply(1:length(NIRMIRXRF_cal2),
+                    function (z)
+                      plsr(as.formula(paste(var_ll[[z]],"~",as.name(ii))),
+                           scale = F, trace = T,
+                           ncomp = 15, data = NIRMIRXRF_cal2[[z]],
+                           validation = "LOO")
+    )
+    
+    
+    
+    # Write names to F2_pls object to each embedded list
+    F_name <- rep(c("F12","F12","F3","F4"), 
+                  each = length(var_l))
+    
+    #Pls_names <- paste(F_name,var_ll)
+    
+    #names(Pls_l) <- Pls_names
+    
+    min.OneSig <- ""
+    min.Pls.out <- ""
+  
+      
+    for(i in 1:length(Pls_l)){
+      sig.min <- selectNcomp(Pls_l[[i]], method = "onesigma")
+      min.OneSig <- cbind(min.OneSig,sig.min)
+      # png(paste("C:/Users/breur005/OneDrive - Wageningen University & Research/Rothamsted/Paper_3_plots/",ii,var_ll[[i]],F_name[[i]],".png", sep = ""), res = 400, width = 6, height = 6, unit = "in")
+      # selectNcomp(Pls_l[[i]], method = "onesigma", plot = TRUE)
+      # dev.off()
+      vec.min = which.min(
+        as.data.frame(
+          RMSEP(
+            Pls_l[[i]])$val)[1,1:15])
+      min.Pls.out <- cbind(min.Pls.out,vec.min)
+    }
+    
+    # Remove extra column
+    # pls gives an error for predictions with zero components, hence we added 1 to these.
+    min.Pls.out = as.numeric(min.Pls.out[,2:length(min.Pls.out)])
+    min.Pls.out = ifelse(min.Pls.out==0,1,min.Pls.out)
+    min.OneSig = as.numeric(min.OneSig[,2:length(min.OneSig)])
+    min.OneSig2 <- ifelse(min.OneSig==0,1,min.OneSig) 
+    
+    
+    # Predict most parsimonious models
+    Pred_l <- lapply(1:length(Pls_l), 
+                     function (z)
+                       data.frame(Measured = NIRMIRXRF_cal2[[z]][,c(var_ll[[z]])],
+                                  Predicted = c(predict(
+                                    Pls_l[[z]],
+                                    newdata = 
+                                      NIRMIRXRF_cal2[[z]],
+                                    ncomp = min.OneSig2[[z]])
+                                  ),Soil_property = c(var_ll[[z]]),
+                                  Type = c(F_name[[z]]),
+                                  Ncomp = c(min.OneSig2[[z]]),
+                                  Spc = c(paste(ii)),
+                                  Residuals = as.data.frame(Pls_l[[z]]$residuals)[,min.OneSig2[[z]]]
+                                  
+                       ))
+    
+    
+    Pred_l2 <- vector("list", length(Pred_l))      
+    for(i in 1:length(Pred_l2)){
+      Pred_l2[[i]] <- Pred_l[[i]] %>% 
+        dplyr::mutate(.,
+                      MSE = signif((mean(Predicted-Measured^2)),2),
+                      var_E = var((Predicted-Measured)),
+                      RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+                      RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+                      Mean_P = mean(Predicted),
+                      SD_P = sd(Predicted),
+                      n = n(),
+                      Range_P = max(Predicted)-min(Predicted),
+                      Mean_M = mean(Measured),
+                      SD_M = sd(Measured),
+                      Range_M = max(Measured)-min(Measured),
+                      CCC = c(rep(epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                                  nrow(Pred_l[[i]]))))
+    }
+    
+    
+    
+    # Write outputs
+    spc_m_out[[match(ii,spc_matrix_list[[t]])]] <- Pred_l2  
+    pls_m_out[[match(ii,spc_matrix_list[[t]])]] <- Pls_l
+    OneSig_m_out[[match(ii,spc_matrix_list[[t]])]] <- min.OneSig2
+    minPls_m_out[[match(ii,spc_matrix_list[[t]])]] <- min.Pls.out
+    
+  }
+  
+  
+  # Predict each soil property for both NIR and MIR for entire field
+  
+  # Repeat whole field dataset number of times for each soil property
+  NIRMIRXRF_2 <- rep(NIRMIRXRF, each = length(var_l))
+  
+  # Predict most parsimonious models
+  Pred_df_l <- vector("list", 
+                      length(spc_m_out))
+  
+  for (ii in 1:length(spc_m_out)){
+    
+    Pred_df_l[[ii]] <- lapply(1:length(NIRMIRXRF_2),
+                              function (z)
+                                as.data.frame(predict(
+                                  pls_m_out[[ii]][[z]],
+                                  newdata = 
+                                    NIRMIRXRF_2[[z]],
+                                  ncomp = OneSig_m_out[[ii]][[z]])
+                                )
+    )
+  }
+  
+  # Use the dataset that has Field 1 and Field 2 separated
+  NIRMIRXRF_cal4 <- rep(NIRMIRXRF_cal, each = length(var_l))
+  
+  
+  # TRAINING dataset in same format
+  # However, predict on Field 1 and Field 2 individually, although all 60 points were used in the calibration regression
+  # NIRMIRXRF_call has Field 1, Field 2, Field 3, Field 4
+  Pred_train_df_l <- vector("list", length(spc_m_out))
+  
+  for (ii in 1:length(spc_m_out)){
+    
+    Pred_train_df_l[[ii]] <- lapply(1:length(NIRMIRXRF_cal2),
+                                    function (z)
+                                      as.data.frame(predict(
+                                        pls_m_out[[ii]][[z]],
+                                        newdata = 
+                                          NIRMIRXRF_cal4[[z]],
+                                        ncomp = OneSig_m_out[[ii]][[z]])
+                                      )
+    )
+  }
+  
+  # Cosmetics to write nested list by sensor >> field >> soil property
+  subst_l <- list(c(1:2),c(3:4),c(5:6),c(7:8))
+  Pred_df_l2 <- vector("list", length(Pred_df_l))
+  for (i in 1:length(Pred_df_l2)){
+    for (j in 1:length(subst_l)){
+      Pred_df_l2[[i]][[j]] <- Pred_df_l[[i]][subst_l[[j]]]
+    }
+  }
+  
+  
+  Pred_train_df_l2 <- vector("list", length(Pred_train_df_l))
+  for (i in 1:length(Pred_train_df_l2)){
+    for (j in 1:length(subst_l)){
+      Pred_train_df_l2[[i]][[j]] <- Pred_train_df_l[[i]][subst_l[[j]]]
+    }
+  }
+  
+  
+  
+  ## Combining predictions
+  
+  # WHOLE FIELD DATASET
+  
+  # ---------------------------
+  # ---------------------------
+  
+  Nr_fields <- c("F1_","F2_", "F3_", "F4_")
+  
+  # NIR MIR predictions
+  NIRMIR_Pred_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRMIR_Pred_l[[ii]][[xx]] <- cbind(
+        Pred_df_l2[[1]][[ii]][[xx]],
+        Pred_df_l2[[2]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # NIR XRF predictions
+  NIRXRF_Pred_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRXRF_Pred_l[[ii]][[xx]] <- cbind(
+        Pred_df_l2[[1]][[ii]][[xx]],
+        Pred_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # MIR XRF predictions
+  MIRXRF_Pred_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      MIRXRF_Pred_l[[ii]][[xx]] <- cbind(
+        Pred_df_l2[[2]][[ii]][[xx]],
+        Pred_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  
+  # NIR MIR XRF predictions
+  NIRMIRXRF_Pred_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRMIRXRF_Pred_l[[ii]][[xx]] <- cbind(
+        Pred_df_l2[[1]][[ii]][[xx]],cbind(
+          Pred_df_l2[[2]][[ii]][[xx]]),
+        Pred_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # NIR MIR predictions
+  NIRMIR_Pred_train_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRMIR_Pred_train_l[[ii]][[xx]] <- cbind(
+        Pred_train_df_l2[[1]][[ii]][[xx]],
+        Pred_train_df_l2[[2]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # NIR XRF predictions
+  NIRXRF_Pred_train_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRXRF_Pred_train_l[[ii]][[xx]] <- cbind(
+        Pred_train_df_l2[[1]][[ii]][[xx]],
+        Pred_train_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # MIR XRF predictions
+  MIRXRF_Pred_train_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      MIRXRF_Pred_train_l[[ii]][[xx]] <- cbind(
+        Pred_train_df_l2[[2]][[ii]][[xx]],
+        Pred_train_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  
+  # NIR MIR XRF predictions
+  NIRMIRXRF_Pred_train_l <- vector("list", length(Nr_fields))
+  for (ii in 1:length(Nr_fields)){
+    for (xx in 1:length(var_l)){
+      NIRMIRXRF_Pred_train_l[[ii]][[xx]] <- cbind(
+        Pred_train_df_l2[[1]][[ii]][[xx]],cbind(
+          Pred_train_df_l2[[2]][[ii]][[xx]]),
+        Pred_train_df_l2[[3]][[ii]][[xx]])                                 
+    }
+  }
+  
+  # Forecomb object indexing
+  
+  library(GeomComb)
+  
+  Cal_l <- list(NIRMIRXRF_cal, NIRMIRXRF_cal,
+                NIRMIRXRF_cal, NIRMIRXRF_cal)
+  
+  GR_SP_l <- list(NIRMIR_Pred_l,NIRXRF_Pred_l,
+                  MIRXRF_Pred_l,NIRMIRXRF_Pred_l)
+  
+  GR_SP_train_l <- list(NIRMIR_Pred_train_l,NIRXRF_Pred_train_l,
+                        MIRXRF_Pred_train_l,NIRMIRXRF_Pred_train_l)
+  
+  # ForC list
+  FORC_l <- vector("list", length(GR_SP_l))
+  
+  FORC_l <- lapply(1:length(GR_SP_l),
+                   function (zz)
+                     lapply(1:length(Nr_fields),
+                            function (ii)
+                              lapply(1:length(var_ll5),
+                                     function (xx)
+                                       foreccomb(Cal_l[[zz]][[ii]][,var_ll5[[xx]]],
+                                                 GR_SP_train_l[[zz]][[ii]][[xx]],
+                                                 newpreds = GR_SP_l[[zz]][[ii]][[xx]])
+                              )) 
+  )
+  
+  # Model averaging by OLS regression
+  
+  # Index output list and forecomb object list
+  OLS_Results <- vector("list", length(FORC_l)) # Nr of model averaging comparisons
+  
+  # Run OLS regression for each combination
+  OLS_Results <- lapply(1:length(FORC_l),
+                        function (zz)
+                          lapply(1:length(FORC_l[[zz]]),
+                                 function (xx)
+                                   lapply(1:length(var_l),
+                                          function (j)
+                                            comb_OLS(
+                                              FORC_l[[zz]][[xx]][[j]]))
+                          ))
+  
+  
+  GR_SP_l_list[[t]] <- GR_SP_l
+  GR_SP_train_l_list[[t]] <- GR_SP_train_l
+  Pred_df_l2_list[[t]] <- Pred_df_l2
+  Pred_train_df_l2_list[[t]] <- Pred_train_df_l2
+  OLS_Results_list[[t]] <- OLS_Results
+  Resid_out_list[[t]] <- spc_m_out
+  
+  }
+
+
+```
+
+
+# Subsetting 1st Derivative modelled average NIRMIRXRF predictions
+
+```{r, echo = F, warning = F}
+
+Model_ave_list <- vector("list", length(Nr_fields))
+
+for (i in 1:length(OLS_Results_list[[4]][[4]])){
+  Model_ave_list[[i]] <- cbind(OLS_Results_list[[4]][[4]][[i]][[1]]$Forecasts_Test,
+                               OLS_Results_list[[4]][[4]][[i]][[2]]$Forecasts_Test)
+}
+
+# Select soil properties included in var_l object, subset and merge to dataframe
+Pred_df_l2  <- lapply(1:length(Model_ave_list),
+                      function (z) {
+                        as.data.frame(Model_ave_list[[z]]) %>% 
+                          setNames(.,var_l) %>%
+                          bind_cols(NIRMIRXRF[[z]] %>% 
+                                      dplyr::select(sort(names(NIRMIRXRF[[z]][,1:7]))),
+                                    .) %>%  
+                          setNames(.,c("DEM.5","Field","ID","SC","VWC","x","y",var_l))
+                      }
+)
+
+
+# Add in field label for field 3 and field 4
+Pred_df_l2[[3]]$Field <- c("F3")
+Pred_df_l2[[4]]$Field <- c("F4")
+
+
+```
+
+# Summary statistics of predicted properties for each field 
+
+```{r, echo = F, warning = F}
+
+# Field 3:
+# Remove zeroes from K predictions (1 in total)
+test = Pred_df_l2[[3]][Pred_df_l2[[3]]$`K (mg/kg)` < 0,] # 1 row
+
+Pred_df_l2[[3]] <- Pred_df_l2[[3]] %>% 
+  dplyr::mutate(.,`K (mg/kg)` = replace(`K (mg/kg)`,
+                                        `K (mg/kg)` < 0, NA))
+
+
+# Assess distributions
+for (i in 1:length(Pred_df_l2)){
+  print(psych::describe(Pred_df_l2[[i]][,var_l]))
+}
+
+# Remove duplicate row from Field 4 dataframe
+Pred_df_l2[[4]] = Pred_df_l2[[4]][-c(110),]
+
+```
+
+# Writing functions for plotting and regression models
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Elevation ~ Different soil nutrients
+plot_DEM <- function(df){
+  df %>% 
+    dplyr::select(.,DEM.5,var_l) %>% 
+    gather(Soil_Property, Value, -DEM.5) %>%
+    ggplot(aes(DEM.5, Value))+
+    geom_point()+
+    facet_wrap(~Soil_Property, scales = "free")+
+    ggtitle("Soil property ~ Elevation")+
+    ylab("Soil property")+
+    xlab('Elevation /m')+
+    geom_smooth(method = "loess")
+}
+
+png("./Plots/Field1234_Elevation_soilproperty.png",
+    width = 12, height = 8, units = "in", res = 400)
+s <-   do.call(rbind, Pred_df_l2) %>% 
+  dplyr::select(.,DEM.5,Field,all_of(var_l)) %>% 
+  gather(Soil_Property, Value, -DEM.5,-Field) %>%
+  ggplot(aes(DEM.5, Value))+
+  geom_point()+
+  facet_wrap(Soil_Property~Field, scales = "free",
+             ncol = 4,
+             labeller = label_wrap_gen(multi_line=FALSE))+
+  ylab("Soil property")+
+  xlab('Elevation /m')#+
+#geom_smooth(method = "loess")
+print(s)
+dev.off()
+
+
+# Linear model fit
+lm_df <- function(df){
+  lm_obj <- lapply(var_l, function (z) lm(df[,z]~DEM.5, data = df,
+                                          na.action = na.omit))
+  names(lm_obj) <- var_l
+  lm_sum <- lapply(var_l, function (z) summary(lm_obj[[z]]))
+  lm_op <- lapply(var_l, function (z) plot(lm_obj[[z]], 
+                                           main = names(lm_obj[z])))
+  geo_bind <- lapply(var_l, function (z) 
+    as.data.frame(cbind(df[!is.na(df[,z]),c("x","y")],residuals(lm_obj[[z]]))))
+  lm_geo <- lapply(1:length(var_l), 
+                   function (z) as.geodata(geo_bind[[z]]))
+  lm_var <- lapply(1:length(var_l), function (z)
+    variog(lm_geo[[z]],uvec=20,max.dist=400,
+           trend = "cte", lambda = 1,estimator.type = c("classical"), 
+           direction = "omnidirectional",
+           messages.screen = TRUE))
+  return(list(lm_obj,lm_sum,lm_geo,lm_op,lm_var))
+}
+
+
+# DEM.5 + x + y Linear model fit
+lmxy_df <- function(df){
+  lm_obj <- lapply(var_l, function (z) lm(df[,z]~DEM.5+x+y, data = df,
+                                          na.action = na.omit))
+  names(lm_obj) <- var_l
+  lm_sum <- lapply(var_l, function (z) summary(lm_obj[[z]]))
+  lm_op <- lapply(var_l, function (z) plot(lm_obj[[z]], 
+                                           main = names(lm_obj[z])))
+  geo_bind <- lapply(var_l, function (z) 
+    as.data.frame(cbind(df[!is.na(df[,z]),c("x","y")],residuals(lm_obj[[z]]))))
+  lm_geo <- lapply(1:length(var_l), 
+                   function (z) as.geodata(geo_bind[[z]]))
+  lm_var <- lapply(1:length(var_l), function (z)
+    variog(lm_geo[[z]],uvec=20,max.dist=400,
+           trend = "cte", lambda = 1,estimator.type = c("classical"), 
+           direction = "omnidirectional",
+           messages.screen = TRUE))
+  return(list(lm_obj,lm_sum,lm_geo,lm_op,lm_var))
+}
+
+
+lmxy2_df <- function(df){
+  lm_obj <- lapply(var_l, function (z) lm(df[,z]~x+y, data = df,
+                                          na.action = na.omit))
+  names(lm_obj) <- var_l
+  lm_sum <- lapply(var_l, function (z) summary(lm_obj[[z]]))
+  lm_op <- lapply(var_l, function (z) plot(lm_obj[[z]], 
+                                           main = names(lm_obj[z])))
+  geo_bind <- lapply(var_l, function (z) 
+    as.data.frame(cbind(df[!is.na(df[,z]),c("x","y")],residuals(lm_obj[[z]]))))
+  lm_geo <- lapply(1:length(var_l), 
+                   function (z) as.geodata(geo_bind[[z]]))
+  lm_var <- lapply(1:length(var_l), function (z)
+    variog(lm_geo[[z]],uvec=20,max.dist=400,
+           trend = "cte", lambda = 1,estimator.type = c("classical"), 
+           direction = "omnidirectional",
+           messages.screen = TRUE))
+  return(list(lm_obj,lm_sum,lm_geo,lm_op,lm_var))
+}
+
+
+# Quadratic model fit (including DEM.5)
+lmquad_df <- function(df){
+  lm_obj <- lapply(var_l, function (z) lm(df[,z]~DEM.5+xx+yy+x_2+x_y+y_2, 
+                                          data = df,
+                                          na.action = na.omit))
+  names(lm_obj) <- var_l
+  lm_sum <- lapply(var_l, function (z) summary(lm_obj[[z]]))
+  lm_op <- lapply(var_l, function (z) plot(lm_obj[[z]], 
+                                           main = names(lm_obj[z])))
+  geo_bind <- lapply(var_l, function (z) 
+    as.data.frame(cbind(df[!is.na(df[,z]),c("x","y")],residuals(lm_obj[[z]]))))
+  lm_geo <- lapply(1:length(var_l), 
+                   function (z) as.geodata(geo_bind[[z]]))
+  lm_var <- lapply(1:length(var_l), function (z)
+    variog(lm_geo[[z]],uvec=20,max.dist=400,
+           trend = "cte", lambda = 1,estimator.type = c("classical"), 
+           direction = "omnidirectional",
+           messages.screen = TRUE))
+  return(list(lm_obj,lm_sum,lm_geo,lm_op,lm_var))
+}
+
+
+# Quadratic model fit (excluding DEM.5)
+lmquad2_df <- function(df){
+  lm_obj <- lapply(var_l, function (z) lm(df[,z]~xx+yy+x_2+x_y+y_2, data = df,
+                                          na.action = na.omit))
+  names(lm_obj) <- var_l
+  lm_sum <- lapply(var_l, function (z) summary(lm_obj[[z]]))
+  lm_op <- lapply(var_l, function (z) plot(lm_obj[[z]], 
+                                           main = names(lm_obj[z])))
+  geo_bind <- lapply(var_l, function (z) 
+    as.data.frame(cbind(df[!is.na(df[,z]),c("x","y")],residuals(lm_obj[[z]]))))
+  lm_geo <- lapply(1:length(var_l), 
+                   function (z) as.geodata(geo_bind[[z]]))
+  lm_var <- lapply(1:length(var_l), function (z)
+    variog(lm_geo[[z]],uvec=20,max.dist=400,
+           trend = "cte", lambda = 1,estimator.type = c("classical"), 
+           direction = "omnidirectional",
+           messages.screen = TRUE))
+  return(list(lm_obj,lm_sum,lm_geo,lm_op,lm_var))
+}
+
+
+
+plm_vgm <- function(geo_res,lag,max.lag){
+  par(mfrow = c(1,1))
+  vario.R<-(variog(geo_res,uvec=lag,max.dist=max.lag
+                   ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                   direction = "omnidirectional",
+                   messages.screen = TRUE) )
+  plot(vario.R)
+}
+
+
+ptlm_vgm <- function(geo_res,lag,max.lag,col,pch){
+  #par(mfrow = c(1,1))
+  vario.R<-(variog(geo_res,uvec=lag,max.dist=max.lag
+                   ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                   direction = "omnidirectional",
+                   messages.screen = TRUE) )
+  return(lines(vario.R, type = "p", col = col, pch = pch))
+}
+
+# Diagnostic plots of likfit object
+diag_likfit <- function(likfit_obj){
+  par(mfrow = c(1,2))
+  hist(residuals(likfit_obj))
+  qqnorm(residuals(likfit_obj))
+  qqline(residuals(likfit_obj))
+}
+
+
+```
+
+
+# Linear model computations
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width=8}
+par(mfrow = c(2,2)) # LM Summary requires 2 x 2 panel
+
+list_lm_df <- lapply(1:length(Pred_df_l2),
+                     function (z) 
+                       lm_df(Pred_df_l2[[z]])
+)
+
+list_lmxy_df <- lapply(1:length(Pred_df_l2),
+                       function (z) 
+                         lmxy_df(Pred_df_l2[[z]])
+)
+
+list_lmxy2_df <- lapply(1:length(Pred_df_l2),
+                        function (z) 
+                          lmxy2_df(Pred_df_l2[[z]])
+)
+
+```
+
+
+# XY color plots to assess spatial trends
+
+```{r, echo = FALSE, warning = FALSE, fig.height=4,fig.width=8}
+
+# Plot PLS model-averaged predictions as a function of x,y
+col_xy <- function(df){
+  df = df %>%
+    dplyr::select(.,x,y,var_l) 
+  s1 = lapply(var_l, function (z) df[!is.na(df[,z]),] %>% 
+                ggplot()+
+                geom_point(aes(x, y, col = df[!is.na(df[,z]),z]))+
+                scale_colour_gradient2(low = "#FF0000", mid = "white", 
+                                       high = "#00008B", 
+                                       midpoint = mean(df[!is.na(df[,z]),z]), 
+                                       space = "rgb", guide = "colourbar")+
+                labs(col = z)+
+                #guides(color = guide_legend(keywidth = .75,
+                #                            keyheight = .75)) +
+                theme(legend.title = element_text(size = 7), 
+                      legend.text  = element_text(size = 7),
+                      legend.key.size = unit(.5, "lines"),
+                      legend.position = c(0.1,0.2)))
+  s2 = lapply(var_l, function (z) df[!is.na(df[,z]),] %>% 
+                ggplot()+
+                geom_point(aes(y, df[!is.na(df[,z]),z]))+
+                xlab("y - coordinate")+
+                ylab(z))
+  s3 = lapply(var_l, function (z) df[!is.na(df[,z]),] %>% 
+                ggplot()+
+                geom_point(aes(x,df[!is.na(df[,z]),z]))+
+                xlab("x - coordinate")+
+                ylab(z))
+  s4 = lapply(var_l, function (z) df[!is.na(df[,z]),] %>% 
+                ggplot()+
+                geom_histogram(aes(df[!is.na(df[,z]),z]))+
+                xlab(z))
+  s5 = lapply(1:length(s4), function (z) plot_grid(s1[[z]],
+                                                   s2[[z]],
+                                                   s3[[z]],
+                                                   s4[[z]],
+                                                   nrow = 2,
+                                                   align = "hv"))
+  return(s5)
+}
+
+xy_List <- lapply(1:length(Pred_df_l2),
+                  function (z)
+                    col_xy(Pred_df_l2[[z]]))
+
+# 
+var_l4 <- rep(list(c("K", "P")),length(Pred_df_l2))
+field <- list(c(rep("F1.png",length(var_l))),
+              c(rep("F2.png",length(var_l))),
+              c(rep("F3.png",length(var_l))),
+              c(rep("F4.png",length(var_l))))
+
+# Writing plots to .png
+for(i in 1:length(xy_List)){
+  for (j in 1:length(xy_List[[i]])){
+    png(filename = paste("./Plots/",var_l4[[i]][[j]],field[[i]][[j]],sep = ""), width = 8, height = 6,
+        units = "in", res = 400)
+    print(xy_List[[i]][[j]])
+    dev.off()
+  }
+}
+
+
+# Mutate df for quadratic variables
+par(mfrow = c(2,2))
+Quad_df_list <- lapply(1:length(Pred_df_l2),
+                       function (z) {
+                         Pred_df_l2[[z]] %>% 
+                           mutate(.,
+                                  xx = x-min(x),
+                                  yy = y-min(y),
+                                  x_2 = xx^2,
+                                  x_y = xx*yy,
+                                  y_2 = yy^2)
+                       }
+)
+
+
+# Writing as geodata frames list
+geo_l <- lapply(1:length(Quad_df_list),
+                function (s)
+                  lapply(1:length(var_l),
+                         function (z) 
+                           as.geodata(Quad_df_list[[s]],
+                                      coords.col = c("x", "y"),
+                                      data.col = c(var_l[[z]]),
+                                      covar.col = c("DEM.5", "xx",
+                                                    "yy","x_2","x_y","y_2")
+                           )
+                  )
+)
+
+```
+
+# Quadratic residuals (including elevation as measured by LiDAR)
+
+```{r, echo = FALSE, warning = FALSE, fig.height=8,fig.width=8}
+par(mfrow = c(2,2))
+List_lmquad_df <- lapply(1:length(Quad_df_list),
+                         function (z)
+                           lmquad_df(Quad_df_list[[z]]))
+
+List_lmquad2_df <- lapply(1:length(Quad_df_list),
+                          function (z)
+                            lmquad2_df(Quad_df_list[[z]]))
+
+```
+## Estimating variogram parameters by log-likelihood ratio tests and REML
+
+# Field 1 - Variogram fitting Potassium
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trend
+xy_List[[1]][[1]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.K.F1<-(variog(geo_l[[1]][[1]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+plot(vario.K.F1, xlab = c("Distance / m"), ylab = c("Semivariance"), main = "Field 1 - K (mg / kg)")
+
+# Spherical model fit since exponential model did not converge when fitting with REML
+(F1.K.likfit <- likfit(geo_l[[1]][[1]],
+                       trend = "cte",
+                       ini.cov.pars = c(5000, 50),
+                       nugget = 100,
+                       cov.model = "spherical",
+                       lik.method = "ML"
+))
+
+lines(F1.K.likfit, col = "black") # 
+
+
+# Elevation
+ptlm_vgm(list_lm_df[[1]][[3]][[1]],20,400,"blue",1)
+
+(F1.K.likfit1 <- likfit(geo_l[[1]][[1]],
+                        trend = ~DEM.5,
+                        ini.cov.pars = c(5000, 50),
+                        nugget = 100,
+                        lambda = 1,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+lines(F1.K.likfit1, col = "blue")                     
+ell<-2*(F1.K.likfit1$loglik-F1.K.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+# Indicated as significant 
+ptlm_vgm(list_lmxy_df[[1]][[3]][[1]],20,400,"red",1)
+
+(F1.K.likfit2 <- likfit(geo_l[[1]][[1]],
+                        trend = ~geo_l[[1]][[1]][[3]]$DEM.5+geo_l[[1]][[1]][[3]]$xx+geo_l[[1]][[1]][[3]]$yy,
+                        ini.cov.pars = c(2500, 80),
+                        nugget = 2000,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+ell<-2*(F1.K.likfit2$loglik-F1.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+lines(F1.K.likfit2, col = "red")
+
+plresid_vgm <- function(resid,xy_df,lag,max.lag,col){
+  plot(sample.variogram(resid,
+                        locations = xy_df[,c("x", "y")],
+                        lag.dist.def = lag,
+                        max.lag = max.lag,
+                        estimator = "matheron",
+                        legend.pos = NULL),
+       type = "p",
+       col = col)
+}
+
+ptresid_vgm <- function(resid,xy_df,lag,max.lag,col){
+  points(sample.variogram(resid,
+                          locations = xy_df[,c("x", "y")],
+                          lag.dist.def = lag,
+                          max.lag = max.lag,
+                          estimator = "matheron",
+                          legend.pos = NULL),
+         type = "p",
+         col = col)
+}
+
+
+# Quadratic model
+ptlm_vgm(List_lmquad_df[[1]][[3]][[1]],20,400,"green",1)
+
+(F1.K.likfit3 <- likfit(geo_l[[1]][[1]],
+                        trend = ~geo_l[[1]][[1]][[3]]$DEM.5+geo_l[[1]][[1]][[3]]$xx + geo_l[[1]][[1]][[3]]$yy + geo_l[[1]][[1]][[3]]$x_2 + geo_l[[1]][[1]][[3]]$x_y + geo_l[[1]][[1]][[3]]$y_2,
+                        ini.cov.pars = c(3000, 60),
+                        nugget = 2000,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+# Test with elevation model
+ell<-2*(F1.K.likfit3$loglik-F1.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  #  
+# difference of 5 parameters since linear model was not significant!
+
+lines(F1.K.likfit3, col = "green")
+
+# Nugget needs to be fixed at 4100!! (Based on MSE from calibration)
+(F1.K.REML <- likfit(geo_l[[1]][[1]],
+                     trend = ~geo_l[[1]][[1]][[3]]$DEM.5+geo_l[[1]][[1]][[3]]$xx+geo_l[[1]][[1]][[3]]$yy +geo_l[[1]][[1]][[3]]$x_2+geo_l[[1]][[1]][[3]]$x_y+geo_l[[1]][[1]][[3]]$y_2,
+                     ini.cov.pars = c(1500, 20),
+                     nugget = 4100,
+                     fix.nugget = TRUE,
+                     cov.model = "spherical",
+                     lik.method = "REML"
+))
+
+lines(F1.K.REML, col = "orange")
+
+png(filename = "./Plots/QQ_plot_F1_K.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F1.K.REML)
+dev.off()
+
+
+```
+
+
+# Field 1 - Variogram fitting Phosphorus
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trend
+xy_List[[1]][[2]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.P.F1<-(variog(geo_l[[1]][[2]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+plot(vario.P.F1,xlab = c("Distance / m"), ylab = c("Semivariance"), main = "Field 1 - P (mg / kg)")
+
+# As with available K, spherical model since exponential did not converge in REML fitting procedure
+(F1.P.likfit <- likfit(geo_l[[1]][[2]],
+                       trend = "cte",
+                       ini.cov.pars = c(75, 80),
+                       #kappa = 0.5,
+                       nugget = 30,
+                       cov.model = "spherical",
+                       lik.method = "ML"
+))
+
+lines(F1.P.likfit)
+
+# Elevation
+ptlm_vgm(list_lm_df[[1]][[3]][[2]],20,400,"blue",1)
+
+(F1.P.likfit1 <- likfit(geo_l[[1]][[2]],
+                        trend = ~DEM.5,
+                        ini.cov.pars = c(75, 80),
+                        nugget = 30,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+ell<-2*(F1.P.likfit1$loglik-F1.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+lines(F1.P.likfit1, col = "blue") 
+
+# lmxy2_df in case DEM.5 is not significant
+ptlm_vgm(list_lmxy2_df[[1]][[3]][[2]],20,400,"red",1)
+
+(F1.P.likfit1 <- likfit(geo_l[[1]][[2]],
+                        trend = ~geo_l[[1]][[2]][[3]]$xx+geo_l[[1]][[2]][[3]]$yy,
+                        ini.cov.pars = c(65, 75),
+                        nugget = 20,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+ell<-2*(F1.P.likfit1$loglik-F1.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+lines(F1.P.likfit1, col = "red")
+
+ptlm_vgm(List_lmquad2_df[[1]][[3]][[2]],20,400,"green",1)
+
+# Quadratic trend
+(F1.P.likfit2 <- likfit(geo_l[[1]][[2]],
+                        trend = ~geo_l[[1]][[2]][[3]]$xx+geo_l[[1]][[2]][[3]]$yy+geo_l[[1]][[2]][[3]]$x_2+geo_l[[1]][[2]][[3]]$x_y+geo_l[[1]][[2]][[3]]$y_2,
+                        ini.cov.pars = c(75, 50),
+                        nugget = 30,
+                        cov.model = "spherical",
+                        lik.method = "ML"
+))
+
+
+ell<-2*(F1.P.likfit2$loglik-F1.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  # 
+# 5 added parameters to the quadratic function since linear function was not significant
+
+lines(F1.P.likfit2, col = "green")
+
+# Fix nugget as it is below the MSE of the LOO-CV from calibration procedure
+(F1.P.REML <- likfit(geo_l[[1]][[2]],
+                     trend = ~geo_l[[1]][[2]][[3]]$xx+geo_l[[1]][[2]][[3]]$yy+geo_l[[1]][[2]][[3]]$x_2+geo_l[[1]][[2]][[3]]$x_y+geo_l[[1]][[2]][[3]]$y_2,
+                     ini.cov.pars = c(25, 37),
+                     nugget = 23,
+                     fix.nugget = TRUE,
+                     cov.model = "spherical",
+                     lik.method = "REML"
+))
+
+lines(F1.P.REML, lty = 2, col = "orange")
+
+
+png(filename = "./Plots/QQ_plot_F1_P.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F1.P.REML)
+dev.off()
+
+# Diagnostics of the best variogram fit for each soil property
+l_likvgmF1 <- list(F1.C.REML,F1.pH.REML,F1.Cl.REML,F1.K.REML,F1.P.REML)
+
+```
+
+# Field 2 - Variogram fitting Potassium
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trends 
+xy_List[[2]][[1]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.K.F2<-(variog(geo_l[[2]][[1]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+plot(vario.K.F2, xlab = c("Distance / m"), ylab = c("Semivariance"), main = "Field 2 - K (mg / kg)")
+
+
+(F2.K.likfit <- likfit(geo_l[[2]][[1]],
+                       trend = "cte",
+                       ini.cov.pars = c(8000, 100),
+                       nugget = 2500,
+                       lambda = 1,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F2.K.likfit, col = "black") # stable
+
+var(Pred_df_l2[[2]]$`K (mg/kg)`) # check whether this aligns with the semivarance scale of the empirical variogram 
+
+# Linear model first
+ptlm_vgm(list_lmxy_df[[2]][[3]][[1]], 20,400,"red",1)
+
+(F2.K.likfit1 <- likfit(geo_l[[2]][[1]],
+                        trend = ~geo_l[[2]][[1]][[3]]$xx+geo_l[[2]][[1]][[3]]$yy,
+                        ini.cov.pars = c(6000, 60),
+                        nugget = 2500,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+lines(F2.K.likfit1, col = "red")
+
+ell<-2*(F2.K.likfit1$loglik-F2.K.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+
+ptlm_vgm(list_lm_df[[2]][[3]][[1]],20,400,"blue",1)
+
+(F2.K.likfit2 <- likfit(geo_l[[2]][[1]],
+                        trend = ~geo_l[[2]][[1]][[3]]$xx+geo_l[[2]][[1]][[3]]$yy+DEM.5,
+                        ini.cov.pars = c(5300, 76),          # Similar problem with non-unique optima
+                        nugget = 5300,
+                        lambda = 1,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+
+lines(F2.K.likfit2, col = "blue")
+
+ell<-2*(F2.K.likfit2$loglik-F2.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+ptlm_vgm(List_lmquad_df[[2]][[3]][[1]],20,400,"green",1)
+
+(F2.K.likfit3 <- likfit(geo_l[[2]][[1]],
+                        trend = ~geo_l[[2]][[1]][[3]]$xx+geo_l[[2]][[1]][[3]]$yy+DEM.5+geo_l[[2]][[1]][[3]]$x_2+geo_l[[2]][[1]][[3]]$x_y+geo_l[[2]][[1]][[3]]$y_2,
+                        ini.cov.pars = c(4300, 20),
+                        nugget = 1300,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+ell<-2*(F2.K.likfit3$loglik-F2.K.likfit2$loglik) # 
+Pv<-signif(1-pchisq(ell,3),3)  # 
+
+lines(F2.K.likfit3, col = "green")
+
+(F2.K.REML <- likfit(geo_l[[2]][[1]],
+                     trend = ~DEM.5+geo_l[[2]][[1]][[3]]$xx+geo_l[[2]][[1]][[3]]$yy,
+                     ini.cov.pars = c(6000, 25),
+                     nugget = 3200,             # fix nugget as MSE from calibration
+                     fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+
+lines(F2.K.REML, lty = 2, col = "orange")
+
+png(filename = "./Plots/QQ_plot_F2_K.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F2.K.REML)
+dev.off()
+
+```
+
+# Field 2 - Variogram fitting Phosphorus
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+# Assess trends
+xy_List[[2]][[2]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.P.F2<-(variog(geo_l[[2]][[2]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+
+plot(vario.P.F2, xlab = c("Distance / m"), 
+     ylab = c("Semivariance"), main = "Field 2 - P (mg / kg)",
+     ylim = c(0,150))
+
+# Fit without trend model and plot
+(F2.P.likfit <- likfit(geo_l[[2]][[2]],
+                       trend = "cte",
+                       ini.cov.pars = c(80, 80),
+                       nugget = 20,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F2.P.likfit)
+
+# Linear model first
+ptlm_vgm(list_lmxy2_df[[2]][[3]][[2]],20,400,"red",1)
+
+(F2.P.likfit1 <- likfit(geo_l[[2]][[2]],
+                        trend = ~geo_l[[2]][[2]][[3]]$xx+geo_l[[2]][[2]][[3]]$yy,
+                        ini.cov.pars = c(80, 80),
+                        nugget = 30,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Test with model that includes elevation
+ell<-2*(F2.P.likfit1$loglik-F2.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+lines(F2.P.likfit1, col = "red", lty = 2)
+
+# Elevation 
+ptlm_vgm(list_lmxy_df[[2]][[3]][[2]],20,400,"blue",1)
+
+(F2.P.likfit2 <- likfit(geo_l[[2]][[2]],
+                        trend = ~geo_l[[2]][[2]][[3]]$xx+geo_l[[2]][[2]][[3]]$yy+DEM.5,
+                        ini.cov.pars = c(70, 100),
+                        nugget = 60,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+ell<-2*(F2.P.likfit2$loglik-F2.P.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+lines(F2.P.likfit1, col = "blue") # overal semivariance is not reduced
+
+ptlm_vgm(List_lmquad_df[[2]][[3]][[2]],20,400,"green",1)
+
+# Quadratic trend
+(F2.P.likfit3 <- likfit(geo_l[[2]][[2]],
+                        trend = ~geo_l[[2]][[2]][[3]]$DEM.5+geo_l[[2]][[2]][[3]]$xx+geo_l[[2]][[2]][[3]]$yy+geo_l[[2]][[2]][[3]]$x_2+geo_l[[2]][[2]][[3]]$x_y+geo_l[[2]][[2]][[3]]$y_2,
+                        ini.cov.pars = c(80, 100),
+                        nugget = 60,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Compare the spherical variograms with eachother 
+ell<-2*(F2.P.likfit3$loglik-F2.P.likfit2$loglik) # 
+Pv<-signif(1-pchisq(ell,3),3)  # 
+
+lines(F2.P.likfit2, col = "green")
+
+# Fix nugget!
+(F2.P.REML <- likfit(geo_l[[2]][[2]],
+                     trend = ~geo_l[[2]][[2]][[3]]$DEM.5+geo_l[[2]][[2]][[3]]$xx+geo_l[[2]][[2]][[3]]$yy,
+                     ini.cov.pars = c(60, 100),
+                     nugget = 22, # MSE in PLSR 
+                     fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+lines(F2.P.REML, col = "orange")
+
+png(filename = "./Plots/QQ_F2_P.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F2.P.REML)
+dev.off()
+
+
+```
+
+# Field  3 - Potassium
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trends
+xy_List[[3]][[1]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.K.F3<-(variog(geo_l[[3]][[1]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+var(Pred_df_l2[[3]]$`K (mg/kg)`, na.rm = T)
+
+plot(vario.K.F3, xlab = c("Distance / m"), ylab = c("Semivariance"), main = "Field 3 - K (mg / kg)")
+
+(F3.K.likfit <- likfit(geo_l[[3]][[1]],
+                       trend = "cte",
+                       ini.cov.pars = c(0.15, 23),
+                       nugget = 0.05,
+                       lambda = 1,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F3.K.likfit, col = "black") # stable
+
+var(Pred_df_l2[[3]]$`K (mg/kg)`, na.rm = T) # check whether this aligns with the semivarance scale of the empirical variogram 
+
+# Fit quadratic terms first
+ptlm_vgm(List_lmquad_df[[3]][[3]][[1]],20,400,"green",1)
+
+(F3.K.likfit1 <- likfit(geo_l[[3]][[1]],
+                        trend = ~geo_l[[3]][[1]][[3]]$xx+geo_l[[3]][[1]][[3]]$yy+geo_l[[3]][[1]][[3]]$x_2+geo_l[[3]][[1]][[3]]$x_y+geo_l[[3]][[1]][[3]]$y_2,
+                        ini.cov.pars = c(0.14, 15),
+                        nugget = 0.05,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+ell<-2*(F3.K.likfit1$loglik-F3.K.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  # 
+# 5 parameters different!
+
+lines(F3.K.likfit1, col = "green")
+
+ptlm_vgm(List_lmquad2_df[[3]][[3]][[1]],20,400,"blue",1)
+
+(F3.K.likfit2 <- likfit(geo_l[[3]][[1]],
+                        trend = ~geo_l[[3]][[1]][[3]]$xx+geo_l[[3]][[1]][[3]]$yy+geo_l[[3]][[1]][[3]]$x_2+geo_l[[3]][[1]][[3]]$x_y+geo_l[[3]][[1]][[3]]$y_2+DEM.5,
+                        ini.cov.pars = c(0.12, 6),          
+                        nugget = 0.0001,
+                        lambda = 1,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+lines(F3.K.likfit2, col = "blue")
+
+ell<-2*(F3.K.likfit2$loglik-F3.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+# One parameter different from quadratic function
+
+
+# REML fitting, fixing nugget to calibration MSE
+(F3.K.REML <- likfit(geo_l[[3]][[1]],
+                     trend = ~geo_l[[3]][[1]][[3]]$xx+geo_l[[3]][[1]][[3]]$yy+geo_l[[3]][[1]][[3]]$x_2+geo_l[[3]][[1]][[3]]$x_y+geo_l[[3]][[1]][[3]]$y_2,
+                     ini.cov.pars = c(1600, 40),
+                     nugget = 1100,
+                     fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+lines(F3.K.REML, lty = 1, col = "orange") # 
+
+png(filename = "./Plots/QQ_plot_F3_K.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F3.K.REML)
+dev.off()
+
+
+```
+
+
+# Field 3 - Phosphorus
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trends
+xy_List[[3]][[2]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.P.F3<-(variog(geo_l[[3]][[2]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+
+plot(vario.P.F3, xlab = c("Distance / m"), 
+     ylab = c("Semivariance"), main = "Field 3 - P (mg / kg)"#,
+     #ylim = c(0,150)
+)
+
+(F3.P.likfit <- likfit(geo_l[[3]][[2]],
+                       trend = "cte",
+                       ini.cov.pars = c(60, 60),
+                       nugget = 15,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F3.P.likfit)
+
+ptlm_vgm(list_lm_df[[3]][[3]][[2]],20,400,"blue",1)
+
+(F3.P.likfit1 <- likfit(geo_l[[3]][[2]],
+                        trend = ~DEM.5,
+                        ini.cov.pars = c(50, 40),
+                        nugget = 10,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+ell<-2*(F3.P.likfit1$loglik-F3.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+lines(F3.P.likfit1, col = "blue") #  
+
+ptlm_vgm(list_lmxy_df[[3]][[3]][[2]],20,400,"red",1)
+
+(F3.P.likfit2 <- likfit(geo_l[[3]][[2]],
+                        trend = ~DEM.5+geo_l[[3]][[2]][[3]]$xx+geo_l[[3]][[2]][[3]]$yy,
+                        ini.cov.pars = c(50, 40),
+                        nugget = 20,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Test with model that includes elevation
+ell<-2*(F3.P.likfit2$loglik-F3.P.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+lines(F3.P.likfit2, col = "red", lty = 2)
+
+
+ptlm_vgm(List_lmquad_df[[3]][[3]][[2]],20,400,"green",1)
+
+# Quadratic trend
+(F3.P.likfit3 <- likfit(geo_l[[3]][[2]],
+                        trend = ~geo_l[[3]][[2]][[3]]$DEM.5+geo_l[[3]][[2]][[3]]$xx+geo_l[[3]][[2]][[3]]$yy+geo_l[[3]][[2]][[3]]$x_2+geo_l[[3]][[2]][[3]]$x_y+geo_l[[3]][[2]][[3]]$y_2,
+                        ini.cov.pars = c(30, 15),
+                        nugget = 10,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Compare to model with only elevation (F3.P.likfit1)
+ell<-2*(F3.P.likfit3$loglik-F3.P.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  # 
+
+lines(F3.P.likfit2, col = "green")
+
+# Nugget does not need to be fixed since it is higher than the PLSR MSE
+(F3.P.REML <- likfit(geo_l[[3]][[2]],
+                     trend = ~geo_l[[3]][[2]][[3]]$DEM.5+geo_l[[3]][[2]][[3]]$xx+geo_l[[3]][[2]][[3]]$yy+geo_l[[3]][[2]][[3]]$x_2+geo_l[[3]][[2]][[3]]$x_y+geo_l[[3]][[2]][[3]]$y_2,
+                     ini.cov.pars = c(30, 15),
+                     nugget = 20,
+                     #fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+lines(F3.P.REML, col = "orange")
+
+png(filename = "./Plots/QQ_F3_P.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F3.P.REML)
+dev.off()
+
+```
+
+# Field 4 - Potassium
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+
+# Assess trends
+xy_List[[4]][[1]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.K.F4<-(variog(geo_l[[4]][[1]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+plot(vario.K.F4, xlab = c("Distance / m"), ylab = c("Semivariance"), main = "Field 4 - K (mg / kg)")
+
+(F4.K.likfit <- likfit(geo_l[[4]][[1]],
+                       trend = "cte",
+                       ini.cov.pars = c(300, 60),
+                       nugget = 1000,
+                       lambda = 1,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F4.K.likfit, col = "black") # stable
+
+var(Pred_df_l2[[4]]$`K (mg/kg)`, na.rm = T) # check whether this aligns with the semivarance scale of the empirical variogram 
+
+ptlm_vgm(list_lm_df[[4]][[3]][[1]],20,400,"blue",1)
+
+(F4.K.likfit1 <- likfit(geo_l[[4]][[1]],
+                        trend = ~DEM.5,
+                        ini.cov.pars = c(2500, 20),          
+                        nugget = 130,
+                        lambda = 1,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+lines(F4.K.likfit1, col = "blue")
+
+ell<-2*(F4.K.likfit1$loglik-F4.K.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+ptlm_vgm(list_lmxy_df[[4]][[3]][[1]], 20,400,"red",1) # lmxy since elevation is included
+
+(F4.K.likfit2 <- likfit(geo_l[[4]][[1]],
+                        trend = ~geo_l[[4]][[1]][[3]]$DEM.5+geo_l[[4]][[1]][[3]]$xx+geo_l[[4]][[1]][[3]]$yy,
+                        ini.cov.pars = c(2500, 30),
+                        nugget = 200,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+lines(F4.K.likfit2, col = "red")
+
+# Test with elevation trend model
+ell<-2*(F4.K.likfit2$loglik-F4.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,2),3)  # 
+
+ptlm_vgm(List_lmquad_df[[4]][[3]][[1]],20,400,"green",1)
+
+(F4.K.likfit3 <- likfit(geo_l[[4]][[1]],
+                        trend = ~geo_l[[4]][[1]][[3]]$DEM.5+geo_l[[4]][[1]][[3]]$xx+geo_l[[4]][[1]][[3]]$yy+geo_l[[4]][[1]][[3]]$x_2+geo_l[[4]][[1]][[3]]$x_y+geo_l[[4]][[1]][[3]]$y_2,
+                        ini.cov.pars = c(2800, 20),
+                        nugget = 150,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Test with model with elevation
+ell<-2*(F4.K.likfit3$loglik-F4.K.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  # 
+# 5 parameters different
+
+lines(F4.K.likfit3, col = "green")
+
+
+# Large underestimation of nugget variance!
+# Fix nugget at error of PLSR
+(F4.K.REML <- likfit(geo_l[[4]][[1]],
+                     trend = ~geo_l[[4]][[1]][[3]]$DEM.5+geo_l[[4]][[1]][[3]]$xx+geo_l[[4]][[1]][[3]]$yy+geo_l[[4]][[1]][[3]]$x_2+geo_l[[4]][[1]][[3]]$x_y+geo_l[[4]][[1]][[3]]$y_2,
+                     ini.cov.pars = c(2500, 20),
+                     nugget = 720,
+                     fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+
+lines(F4.K.REML, lty = 2, col = "orange") 
+
+png(filename = "./Plots/QQ_plot_F4_K.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F4.K.REML)
+dev.off()
+
+```
+
+# Field 4 - Phosphorus
+
+```{r, echo = FALSE, warning = FALSE, fig.height= 8, fig.width= 8}
+# Assess trends
+xy_List[[4]][[2]]
+
+# Variogram fitting
+par(mfrow = c(1,1))
+vario.P.F4<-(variog(geo_l[[4]][[2]],uvec=10,max.dist=300
+                    ,trend = "cte", lambda = 1,estimator.type = c("classical"), 
+                    direction = "omnidirectional",
+                    messages.screen = TRUE) )
+
+
+plot(vario.P.F4, xlab = c("Distance / m"), 
+     ylab = c("Semivariance"), main = "Field 4 - P (mg / kg)"#,
+     #ylim = c(0,150)
+)
+
+(F4.P.likfit <- likfit(geo_l[[4]][[2]],
+                       trend = "cte",
+                       ini.cov.pars = c(200, 50),
+                       nugget = 35,
+                       cov.model = "exponential",
+                       lik.method = "ML"
+))
+
+lines(F4.P.likfit)
+
+ptlm_vgm(list_lm_df[[4]][[3]][[2]],20,400,"blue",1)
+
+(F4.P.likfit1 <- likfit(geo_l[[4]][[2]],
+                        trend = ~DEM.5,
+                        ini.cov.pars = c(130, 40),
+                        nugget = 10,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+ell<-2*(F4.P.likfit1$loglik-F4.P.likfit$loglik) # 
+Pv<-signif(1-pchisq(ell,1),3)  # 
+
+lines(F4.P.likfit1, col = "blue") 
+
+ptlm_vgm(list_lmxy_df[[4]][[3]][[2]],20,400,"red",1)
+
+(F4.P.likfit2 <- likfit(geo_l[[4]][[2]],
+                        trend = ~DEM.5+geo_l[[4]][[2]][[3]]$xx+geo_l[[4]][[2]][[3]]$yy,
+                        ini.cov.pars = c(150, 40),
+                        nugget = 20,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Test with model that includes elevation
+ell<-2*(F4.P.likfit2$loglik-F4.P.likfit1$loglik) # 1.29
+Pv<-signif(1-pchisq(ell,2),3)  # 0.524
+
+lines(F4.P.likfit2, col = "red", lty = 2)
+
+#hist(residuals(F1.P.likfit1))
+
+ptlm_vgm(List_lmquad_df[[4]][[3]][[2]],20,400,"green",1)
+
+# Quadratic trend
+(F4.P.likfit3 <- likfit(geo_l[[4]][[2]],
+                        trend = ~geo_l[[4]][[2]][[3]]$DEM.5+geo_l[[4]][[2]][[3]]$xx+geo_l[[4]][[2]][[3]]$yy+geo_l[[4]][[2]][[3]]$x_2+geo_l[[4]][[2]][[3]]$x_y+geo_l[[4]][[2]][[3]]$y_2,
+                        ini.cov.pars = c(130, 25),
+                        nugget = 10,
+                        cov.model = "exponential",
+                        lik.method = "ML"
+))
+
+# Compare to model with only elevation (F4.P.likfit1)
+ell<-2*(F4.P.likfit3$loglik-F4.P.likfit1$loglik) # 
+Pv<-signif(1-pchisq(ell,5),3)  # 
+# 5 parameters difference!
+
+lines(F4.P.likfit2, col = "green")
+
+# No reason to fix the nugget
+(F4.P.REML <- likfit(geo_l[[4]][[2]],
+                     trend = ~geo_l[[4]][[2]][[3]]$DEM.5,
+                     ini.cov.pars = c(130, 15),
+                     nugget = 26,
+                     #fix.nugget = TRUE,
+                     cov.model = "exponential",
+                     lik.method = "REML"
+))
+
+lines(F4.P.REML, col = "orange")
+
+png(filename = "./Plots/QQ_F4_P.png", width = 10, height = 6,
+    units = "in", res = 400)
+diag_likfit(F4.P.REML)
+dev.off()
+
+
+# Create different lists with final REML models
+reml_list <- list(list(F1.K.REML,F1.P.REML),
+                  list(F2.K.REML,F2.P.REML),
+                  list(F3.K.REML,F3.P.REML),
+                  list(F4.K.REML,F4.P.REML))
+
+```
+# REML variogram fit plots 
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Links to format plot margins
+#https://stevencarlislewalker.wordpress.com/2012/06/28/overall-axis-labels-with-mfrow/
+#http://rfunction.com/archives/1302
+
+# Merge all fields together but only for K and P
+tiff(filename = paste("./Plots/Figure 1.tiff", sep = ""), 
+    height = 10, width =6, res = 500, pointsize = 1/500, units = "in")
+
+par(mfrow = c(4,2))
+par(oma = c(4, 4, 0, 1.75))   
+par(mar=c(1.7,4,1.7,.3))
+
+plot(c(0,300), c(0, 10000), type="n",  xlab = "", 
+     ylab = expression(paste("Field 1")), 
+     main = expression(paste("K / mg ", kg^"-1")), 
+     xaxs = "i", yaxs = "i", xaxt = 'n', axes = F, cex.lab = 1.3)
+axis(side = 2, at = c(0,2500, 5000, 7500, 10000))
+box()
+lines(vario.K.F1, type = "p")
+ptlm_vgm(List_lmquad_df[[1]][[3]][[1]],10,300,"black",16);
+lines(F1.K.REML);
+
+plot(c(0,300), c(0, 150), type="n",  xlab = "", ylab = "", 
+     main = expression(paste("P / mg ", kg^"-1")), 
+     xaxs = "i", yaxs = "i", xaxt = 'n', axes = F)
+axis(side = 2, at = c(0,50, 100, 150))
+box()
+lines(vario.P.F1,type = "p")
+ptlm_vgm(List_lmquad2_df[[1]][[3]][[2]],10,300,"black",16)
+lines(F1.P.REML)
+
+# Field 2
+plot(c(0,300), c(0, 12000), type="n",  xlab = "", ylab = expression(paste("Field 2")), 
+     main = expression(paste("K / mg ", kg^"-1")), xaxs = "i", yaxs = "i", xaxt = 'n',
+     axes = F, cex.lab = 1.3)
+axis(side = 2, at=c(0,3000,6000,9000,12000))
+box()
+lines(vario.K.F2, type = "p")
+ptlm_vgm(list_lmxy_df[[2]][[3]][[1]],10,300,"black",16);
+lines(F2.K.REML);
+
+plot(c(0,300), c(0, 150), type="n", xlab = "", ylab = "", 
+     main = expression(paste("P / mg ", kg^"-1")), 
+     xaxs = "i", yaxs = "i", xaxt = 'n', axes = F)
+axis(side = 2, at = c(0,50, 100, 150))
+box()
+lines(vario.P.F2,type = "p")
+ptlm_vgm(list_lmxy_df[[2]][[3]][[2]],10,300,"black",16)
+lines(F2.P.REML)
+
+# Field 3
+plot(c(0,300), c(0, 8000), type="n",  xlab = "", ylab = expression(paste("Field 3")), main = expression(paste("K / mg ", kg^"-1")), xaxs = "i", yaxs = "i", xaxt = 'n', cex.lab = 1.3)
+lines(vario.K.F3, type = "p")
+ptlm_vgm(List_lmquad2_df[[3]][[3]][[1]],10,300,"black",16);
+lines(F3.K.REML);
+
+plot(c(0,300), c(0, 200), type="n",  xlab = "", ylab = "", 
+     main = expression(paste("P / mg ", kg^"-1")), 
+     xaxs = "i", yaxs = "i", xaxt = 'n', axes = F)
+axis(side = 2, at = c(0,50,100,150,200))
+box()
+lines(vario.P.F3,type = "p")
+ptlm_vgm(List_lmquad_df[[3]][[3]][[2]],10,300,"black",16)
+lines(F3.P.REML)
+
+# Field 4
+
+plot(c(0,300), c(0, 4000), type="n",  xlab = "", ylab = expression(paste("Field 4")), main = expression(paste("K / mg ", kg^"-1")), yaxs = "i", xaxs= "i", cex.lab = 1.3)
+lines(vario.K.F4, type = "p")
+ptlm_vgm(List_lmquad_df[[4]][[3]][[1]],10,300,"black",16);
+lines(F4.K.REML);
+
+plot(c(0,300), c(0, 250), type="n", xlab = "", ylab = "", 
+     main = expression(paste("P / mg ", kg^"-1")),
+     yaxs = "i", xaxs = "i", axes = F)
+axis(side = 1)
+axis(side = 2, at = c(0,50,100,150,200,250))
+box()
+lines(vario.P.F4,type = "p")
+ptlm_vgm(list_lm_df[[4]][[3]][[2]],10,300,"black",16)
+lines(F4.P.REML)
+
+mtext('Distance / m', side = 1, outer = TRUE, line = 2)
+mtext('Semivariance', side = 2, outer = TRUE, line = 2)
+
+dev.off()
+
+
+
+```
+
+# Kriging based on fitted variogram models
+
+```{r, echo = FALSE, warning = FALSE}
+
+list.files(pattern = ".tif")
+
+# Field 1 ----------------------------------------------------------------------
+
+# Write .TIFF file to spatialgriddataframe
+Paddys.r <- raster("Clip_F1_14_08_2020.tif")
+Paddys.r <- projectRaster(Paddys.r, crs="+init=epsg:27700")
+
+P_sf <- st_as_sf(Pred_df_l2[[1]],
+                 coords = c("x","y"),
+                 crs = 27700)
+
+names(Paddys.r) <- "DEM.5" # Algin with name for elevation variable
+
+P_df <- as.data.frame(rasterToPoints(Paddys.r))
+P_df <- P_df %>% 
+  mutate(.,
+         xx = x-min(x),
+         yy = y-min(y),
+         x_2 = xx^2,
+         x_y = xx*yy,
+         y_2 = yy^2)
+
+P_geo <- as.geodata(P_df,
+                    coords.col = c("x", "y"),
+                    #data.col = c(colnames(Q_P2)[z]),
+                    data.col = c("DEM.5", "x","y","xx", "yy","x_2","x_y","y_2"))
+
+
+Paddys_SGDF = as(Paddys.r, "SpatialGridDataFrame")
+names(Paddys_SGDF@grid@cellcentre.offset) <- c("x", "y")
+
+# LiDAR + 2nd order poly
+KrF1K = krige.conv(geo_l[[1]][[1]], locations=P_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F1.K.REML,
+                                       trend.d= F1.K.REML$trend,
+                                       trend.l = ~P_df$DEM.5+P_df$xx+P_df$yy+P_df$x_2+P_df$x_y+P_df$y_2))
+
+
+# 2nd order poly
+KrF1P = krige.conv(geo_l[[1]][[2]], locations=P_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F1.P.REML,
+                                       trend.d= F1.P.REML$trend,
+                                       trend.l = ~P_df$xx+P_df$yy+P_df$x_2+P_df$x_y+P_df$y_2))
+
+
+# Field 2 ----------------------------------------------------------------------
+
+# Write .TIFF file to spatialgriddataframe
+ST.r <- raster("Clip_F2_14_08_2020.tif")
+ST.r <- projectRaster(ST.r, crs="+init=epsg:27700")
+
+ST_sf <- st_as_sf(Pred_df_l2[[2]],
+                  coords = c("x","y"),
+                  crs = 27700)
+
+names(ST.r) <- "DEM.5"
+
+ST_df <- as.data.frame(rasterToPoints(ST.r))
+ST_df <- ST_df %>% 
+  mutate(.,
+         xx = x-min(x),
+         yy = y-min(y),
+         x_2 = xx^2,
+         x_y = xx*yy,
+         y_2 = yy^2)
+
+# Elevation + 1st order poly
+KrF2K = krige.conv(geo_l[[2]][[1]], locations=ST_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F2.K.REML,
+                                       trend.d= F2.K.REML$trend,
+                                       trend.l = ~ST_df$DEM.5+ST_df$xx+ST_df$yy))
+
+# Elevation + 1st order poly
+KrF2P = krige.conv(geo_l[[2]][[2]], locations=ST_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F2.P.REML,
+                                       trend.d= F2.P.REML$trend,
+                                       trend.l = ~ST_df$DEM.5+ST_df$xx+ST_df$yy))
+
+# Field 3 ----------------------------------------------------------------------
+
+list.files(pattern = ".tif")
+
+T2B.r <- raster("Clip_F3_14_08_2020.tif")
+T2B.r <- projectRaster(T2B.r, crs = "+init=epsg:27700")
+
+T2B_sf <- st_as_sf(Pred_df_l2[[3]],
+                   coords = c("x","y"),
+                   crs = 27700)
+
+names(T2B.r) <- "DEM.5"
+
+T2B_df <- as.data.frame(rasterToPoints(T2B.r))
+T2B_df <- T2B_df %>% 
+  mutate(.,
+         xx = x-min(x),
+         yy = y-min(y),
+         x_2 = xx^2,
+         x_y = xx*yy,
+         y_2 = yy^2)
+
+# 2nd order poly
+KrF3K = krige.conv(geo_l[[3]][[1]], locations=T2B_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F3.K.REML,
+                                       trend.d= F3.K.REML$trend,
+                                       trend.l = ~T2B_df$xx+T2B_df$yy+T2B_df$x_2+T2B_df$x_y+T2B_df$y_2))
+
+# Elevation + 2nd order poly
+KrF3P = krige.conv(geo_l[[3]][[2]], locations=T2B_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F3.P.REML,
+                                       trend.d= F3.P.REML$trend,
+                                       trend.l = ~T2B_df$DEM.5+ T2B_df$xx+T2B_df$yy+T2B_df$x_2+T2B_df$x_y+T2B_df$y_2))
+
+# Field 4 ----------------------------------------------------------------------
+
+K6.r <- raster("NM_NL_K06_BNG.tif")
+K6.r <- projectRaster(K6.r, crs = "+init=epsg:27700")
+
+K6_sf <- st_as_sf(Pred_df_l2[[4]],
+                  coords = c("x","y"),
+                  crs = 27700)
+
+names(K6.r) <- "DEM.5"
+
+K6_df <- as.data.frame(rasterToPoints(K6.r))
+K6_df <- K6_df %>% 
+  mutate(.,
+         xx = x-min(x),
+         yy = y-min(y),
+         x_2 = xx^2,
+         x_y = xx*yy,
+         y_2 = yy^2)
+
+# 2nd order poly 
+KrF4K = krige.conv(geo_l[[4]][[1]], locations=K6_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F4.K.REML,
+                                       trend.d= F4.K.REML$trend,
+                                       trend.l = ~K6_df$DEM.5+K6_df$xx+K6_df$yy+K6_df$x_2+K6_df$x_y+K6_df$y_2))
+
+
+# Elevation
+KrF4P = krige.conv(geo_l[[4]][[2]], locations=K6_df[,c("x","y")], 
+                   krige=krige.control(obj.model=F4.P.REML,
+                                       trend.d= F4.P.REML$trend,
+                                       trend.l = ~K6_df$DEM.5))
+
+```
+
+# Raster plotting
+
+```{r, echo = FALSE, warning = FALSE}
+
+# Create lists for each field
+krig_P <- list(KrF1K,KrF1P)
+krig_ST <- list(KrF2K,KrF2P)
+krig_T2B <- list(KrF3K,KrF3P)
+krig_K6 <- list(KrF4K,KrF4P)
+
+# kriging list
+krig_L <- list(krig_P,krig_ST,krig_T2B,krig_K6)
+
+# rstr df list
+rstr_df_L <- list(P_df,ST_df,T2B_df,K6_df)
+
+# Function to rasterize all spatialgrid dataframe variables
+kr2df <- function(pred_df,krige_ls,length){
+  df_l <- vector(mode = "list", length = length)
+  for (i in 1:length){
+    temp <- lapply(c("predict","krige.var"),
+                   function (z)
+                     data.frame(x = pred_df$x,
+                                y = pred_df$y,
+                                z = krige_ls[[i]][[z]]))
+    df_l[[i]] <- temp
+  }
+  return(df_l)
+}
+
+krdf <- lapply(1:length(krig_L),
+               function (x)
+                 kr2df(rstr_df_L[[x]],
+                       krig_L[[x]],
+                       length(var_l))) # length of var_l
+
+# Dataframe to raster function
+df2rs <- function(df_l,length){
+  r_xyZ_l <- vector(mode = "list", length = length)
+  for(i in 1:length){
+    temp <- lapply(1:2, # kriging predictions and variance
+                   function (z)
+                     rasterFromXYZ(df_l[[i]][[z]],
+                                   crs = "+init=epsg:27700"))
+    r_xyZ_l[[i]] <- temp
+  }
+  return(r_xyZ_l)
+}
+
+
+RS_l <- lapply(1:length(krdf),
+               function (z)
+                 df2rs(krdf[[z]],
+                       length(var_l))
+)
+
+# Set color palette
+cols <- colorRampPalette(c("cadetblue4","cadetblue","cadetblue3",
+                           "cornsilk1",
+                           "burlywood1","burlywood3","burlywood4"))
+
+names_list <- c("Field 1", "Field 2", "Field 3","Field 4")
+
+# ----------------------------------------------------------------------
+# Repeat for only P and K
+# Write all lefthand column rasters to single list
+lhc_r <- lapply(1:length(RS_l),
+                function (x)
+                  list(RS_l[[x]][[1]][[1]],
+                       RS_l[[x]][[2]][[1]]))
+
+# right hand columns to list (i.e. kriging variance)
+rhc_r <- lapply(1:length(RS_l),
+                function (x)
+                  list(RS_l[[x]][[1]][[2]],
+                       RS_l[[x]][[2]][[2]]))
+
+
+lhc_r_names <- rep(list(c(expression(paste("K (mg / kg)")),
+                          expression(paste("P (mg / kg)")))),4)
+
+rhc_r_names <- rep(list(c(expression(paste(sigma[krig]^2," (K)")),
+                          expression(paste(sigma[krig]^2," (P)")))),4)
+
+out_list <- c("K", "P")
+for (j in 1:length(out_list)){
+  png(filename = paste("./Plots/Kr_pred_",out_list[[j]],".png", sep = ""), 
+      height = 12, width =7, res = 400, units = "in")
+  par(mfrow = c(4,2))
+  par(oma = c(4, 3.5, 0, 1.75))   
+  par(mar=c(2.5,4,2,1.8))
+  for (i in 1:length(names_list)){
+    plot(lhc_r[[i]][[j]],
+         ylab = names_list[[i]],
+         main = lhc_r_names[[i]][[j]],
+         col= cols(100),
+         npretty=2, cex.lab = 1.3)
+    plot(rhc_r[[i]][[j]],
+         main = rhc_r_names[[i]][[j]],
+         col = cols(100),
+         npretty=2)
+  }
+  mtext(expression(paste(x[1]," / m")), side = 1, outer = TRUE, line = 2)
+  mtext(expression(paste(x[2]," / m")), side = 2, outer = TRUE, line = 2)
+  dev.off()
+}
+
+
+```
+
+# Leave-one-out cross validation on REML models
+
+```{r, echo = FALSE, warning = FALSE}
+
+field <- list("Field 1","Field 2",
+              "Field 3","Field 4")
+
+soil_prop <- c("K (mg/kg)","P (mg/kg)")
+
+CV_list <- vector("list",length(reml_list))
+
+
+gc()
+parallelStartSocket(parallel::detectCores())
+
+for (i in 1:length(reml_list)){
+  CV_list[[i]] <- lapply(1:length(reml_list[[i]]),
+                         function (z)
+                           xvalid(geo_l[[i]][[z]],
+                                  model = reml_list[[i]][[z]],
+                                  reestimate = F)
+  )
+}  
+
+
+CV_df_err <- vector("list", length(CV_list))
+
+for (i in 1:length(CV_list)){
+  CV_df_err[[i]]  <- do.call(rbind, 
+                             lapply(1:length(CV_list[[i]]),
+                                    function (z)
+                                      data.frame(Measured = CV_list[[i]][[z]]$data,
+                                                 Predicted = CV_list[[i]][[z]]$predicted,
+                                                 Soil_property = soil_prop[[z]],
+                                                 Field = field[[i]],
+                                                 Error = CV_list[[i]][[z]]$error,
+                                                 Std_error = CV_list[[i]][[z]]$std.error,
+                                                 C_prob = CV_list[[i]][[z]]$prob
+                                      )
+                             )
+  )
+}
+
+CV_df_err <- lapply(1:length(CV_df_err),
+                    function (z)
+                      CV_df_err[[z]] %>% 
+                      group_by(.,Soil_property,Field) %>% 
+                      mutate(.,
+                             MSE = signif((mean(Predicted-Measured^2)),2),
+                             var_E = var((Predicted-Measured)),
+                             RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+                             ME = mean(Error),
+                             Mean_SSPE = signif(mean((Std_error)^2),2),
+                             Median_SSPE = signif(median((Std_error)^2),2),
+                             MSTDE = mean(Std_error),
+                             Skew = PerformanceAnalytics::skewness(Std_error),
+                             Kurtosis = PerformanceAnalytics::kurtosis(Std_error),
+                             Cprob_bin = cut(C_prob,
+                                             breaks = c(seq(0,1,0.01)),
+                                             labels = c(seq(0.005,0.995,0.01)),
+                                             include.lowest = T),
+                             #Cprob_cut = gtools::quantcut(C_prob, seq(0,1,by=0.02)),
+                             n_gr = n()))#
+
+# 
+CV_df_err_2 <- lapply(1:length(CV_df_err),
+                     function (z)
+                       CV_df_err[[z]] %>%
+                       group_by(., Soil_property, Field, Cprob_bin) %>%
+                       mutate(.,
+                                no_occ = length(Cprob_bin)/n_gr) %>%
+                       group_by(., Soil_property, Field, Cprob_bin) %>%
+                       summarise(.,
+                                 C_prob = mean(C_prob),
+                                 no_occ2 = mean(no_occ))) 
+
+
+CV_df_err_2 <- lapply(1:length(CV_df_err_2),
+                             function (z)
+                               CV_df_err_2[[z]] %>%
+                               group_by(.,Soil_property,Field) %>%
+                               mutate(.,
+                                      cum_occ = cumsum(no_occ2)
+                                     ))
+
+Field_label <- c("Field 1", "Field 2", "Field 3", "Field 4")
+
+Accuracy_df <- do.call(rbind,
+                      lapply(1:length(CV_df_err_2),
+                             function (z)
+                               CV_df_err_2[[z]] %>%
+                               mutate(.,
+                                      Field = c(Field_label[[z]]))))#
+
+
+png(filename = "./Plots/Supplementary_Fig_3.png",
+    units = "in",
+    width = 6, height = 4, res = 400)
+s <- ggplot(Accuracy_df,
+      aes(C_prob,cum_occ, color = Field))+
+ geom_line(size = 1.25)+
+ geom_abline(intercept = 0, slope = 1)+
+ geom_hline(yintercept = 0.5, linetype = "dashed", size = .5)+
+ geom_vline(xintercept = 0.5, linetype = "dashed", size = .5)+
+ facet_grid(~Soil_property)+
+ ylab(expression(
+   #"Fraction of true values in symmetric"~italic(p)*"-PI"~
+   #  (
+       bar(xi)~(italic(p))
+   #    )
+   ))+
+ xlab(expression("Probability interval -"~italic(p)))+
+ scale_x_continuous(breaks=c(0,0.5,1),
+       labels=c(0, 0.5, 1))+
+ scale_y_continuous(breaks=c(0,0.5,1),
+       labels=c(0, 0.5, 1))+
+ scale_color_manual(name = "Field",
+                    values = c("#ebd469",
+                             "#4ac6ad",
+                             "#ac0c59",
+                             "midnightblue"))
+s <- s + theme(legend.position = c(0.95, 0.2), # c(0,0) bottom left, c(1,1) top-right.
+ legend.background = element_rect(fill = "white",
+                                  colour = NA),
+ legend.box.background = element_rect(colour = "black"),
+ legend.key.width = unit(.2, "cm"),
+ legend.key.height = unit(.3, "cm")
+ #"#A99272", "#BBD700", "#0D6633"
+)
+print(s)
+dev.off()
+
+
+# -------------------------------------------------------------------
+# Repeat for K and P only
+
+CV_err_df <- do.call(rbind, CV_df_err)
+
+# NOTE:: ALTER THIS ONCE SUCCESSFULLY RUN
+
+CV_err_df$Soil_ID <- factor(CV_err_df$Soil_property,
+                             levels = c("K (mg/kg)", "P (mg/kg)"),
+                             ordered = T,
+                             labels = c(expression(paste("K / mg ",kg^"-1")), expression(paste("P / mg ",kg^"-1"))))
+
+
+CV_err_df$Field_ID <- factor(CV_err_df$Field,
+                              levels = c("Field 1", "Field 2",
+                                         "Field 3", "Field 4"),
+                              ordered = T,
+                              labels = c(expression(paste("Field 1")),
+                                         expression(paste("Field 2")),
+                                         expression(paste("Field 3")),
+                                         expression(paste("Field 4"))
+                              )
+)
+
+facetlims_list <- CV_err_df %>% 
+  group_by(Field_ID,Soil_ID) %>% 
+  summarize(min = min(Measured, Predicted),
+            max = max(Measured, Predicted)) %>% 
+  gather(range, Measured, -Soil_ID, -Field_ID) %>% 
+  mutate(Predicted = Measured, range = NULL)
+
+png(filename = paste("./Plots/Supplementary Figure 2.png"), width = 5, height = 10, units = "in", res = 400)
+s <- ggplot(CV_err_df,
+            aes(Measured,Predicted))+
+  geom_point()+
+  geom_abline(intercept = 0, slope = 1)+
+  facet_wrap(Field_ID~Soil_ID, 
+             scales = "free",
+             ncol = 2,
+             labeller = labeller(.cols = label_parsed,
+                                 .multi_line = F)
+             #labeller = label_wrap_gen(multi_line = T)
+  )+
+  xlab('Measured')+
+  ylab('Predicted')+
+  geom_blank(data = facetlims_list)+
+  geom_text(x = -Inf, y = Inf, 
+            label = paste("Median","SSPE:", 
+                          signif(CV_err_df$Median_SSPE, 2), sep = " "), 
+            parse = F, hjust = 0, vjust = 1.75, size = 3, color = "black")+
+  geom_text(x = -Inf, y = Inf, 
+            label = paste("Mean","SSPE:", 
+                          signif(CV_err_df$Mean_SSPE, 3), sep = " "), 
+            parse = F, hjust = 0, vjust = 3.25, size = 3, color = "black")+
+  geom_text(x = -Inf, y = Inf, 
+            label = paste("RMSE:", 
+                          signif(CV_err_df$RMSE, 3), sep = " "), 
+            parse = F, hjust = 0, vjust = 4.75, size = 3, color = "black")
+print(s)
+dev.off()
+
+```
+
+## Loss function on variable rate fertilizer application
+
+```{r, echo = F, warning = F}
+
+# Re-write data frames 
+KrP_list <- list(KrF1P, KrF2P, KrF3P, KrF4P)
+
+KrP_df <- lapply(1:length(KrP_list),
+                 function (z)
+                   data.frame(meanP = KrP_list[[z]]$predict,
+                              krigVar = KrP_list[[z]]$krige.var))
+
+
+KrK_list <- list(KrF1K, KrF2K, KrF3K, KrF4K)
+
+# Read df of random sample (n = 10) from kriged dataset - Field 1
+KrK_df <- lapply(1:length(KrK_list),
+                 function (z)
+                   data.frame(meanK = (KrK_list[[z]]$predict),
+                              krigVar = KrK_list[[z]]$krige.var))
+
+
+```
+
+# ------ Potassium
+
+```{r, echo = F, warning = F}
+
+f_Avail_K <- function (mean_Sv, sig_v, S,FE){
+  
+  BER=0.29/90;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  sig=sig_v;
+  meanS=mean_Sv;
+  
+  # We estimate K2O_B 
+  y=((A+B*R^((0.52*FE)+S))*90-0.29*FE)*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)));
+  
+  y
+}
+
+
+```
+
+# Optimize fertilizer application (K2O) based on Expected Loss
+
+```{r, echo = F, warning = F}
+
+r_intgr_K <- function (mean_Sv, S, sig_v){
+  
+  R = 0.98;
+  meanS = mean_Sv;
+  sig = sig_v;
+  
+  y <- (R^S)*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)))
+  
+  return(y)
+}
+
+opt_L_f_K <- function (S_v, sig){
+  
+  BER=0.29/90;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  
+  sig = sig;
+  sig_v = sig;
+  tmp_v <- integrate(r_intgr_K,0,1000,
+                     mean_Sv = S_v,
+                     sig_v=sig)
+  
+  opt_L_N = log((BER/0.52)/(B*log(R)*tmp_v$value))/(0.52*log(R))
+  
+  # check whether > 225
+  opt_LN_kg_f2 <- ifelse(opt_L_N > 225, 225, opt_L_N)
+  
+  # check whether < 0
+  opt_LN_kg_f3 <- ifelse(opt_LN_kg_f2 < 0, 0, opt_LN_kg_f2)
+  
+  return(opt_LN_kg_f3)
+}
+
+
+K_optN_out <- lapply(1:length(KrK_df),
+                     function (z)
+                       lapply(1:nrow(KrK_df[[z]]),
+                              function (x)
+                                opt_L_f_K(KrK_df[[z]][x,c("meanK")],
+                                          sqrt(KrK_df[[z]][x,c("krigVar")]))))
+
+
+```
+
+# Compute Expected Loss based on optimum K2O value
+
+```{r, echo = F, warning = F}
+
+intgr_AvailK <- function (S_v,sig,FE_v) {
+  
+  BER=0.29/90;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  
+  S=S_v;
+  #OPtimum K2O
+  N0=log((BER/0.52)/(R^S*B*log(R)))/(0.52*log(R)); 
+  N=0:225;
+  
+  Profit=(A+B*R^((0.52*N)+S))*90-(0.29*N);
+  
+  L=((A+B*R^((0.52*N0)+S))*90-0.29*N0)-Profit;
+  
+  q = integrate(f_Avail_K,0,1000, FE=FE_v, mean_Sv = S, sig_v = sig);
+  out1 <- q$value
+  out2 <- q$abs.error
+  
+  #OPtimum K2O
+  N0=(log((BER/0.52)/(R^S*B*log(R)))/(0.52*log(R)));
+  
+  N0 <- ifelse(N0 > 225, 225, N0)
+  
+  N0 <- ifelse(N0 < 0, 0, N0)
+  
+  # Profit for N0
+  Profit=(A+B*R^((0.52*N0)+S))*90-(0.29*N0);
+  
+  out3 <- Profit-out1
+  
+  
+  return(out3)
+  
+}
+
+
+K_ExL_out <- lapply(1:length(K_optN_out),
+                    function (z)
+                      lapply(1:nrow(KrK_df[[z]]),
+                             function (x)
+                               intgr_AvailK(S_v = KrK_df[[z]][x,c("meanK")],
+                                            sig = sqrt(KrK_df[[z]][x,c("krigVar")]),
+                                            FE_v = K_optN_out[[z]][[x]])))
+
+
+
+```
+
+# Loss based on kriged properties without uncertainty
+
+```{r, echo = F, warning = F}
+
+N0_application_K <- function (S_v) {
+  
+  BER=0.29/90;
+  
+  A = 63.3;
+  B = -63.3;
+  C = 0;
+  R = 0.98;
+  
+  S=S_v;
+  #OPtimum K2O
+  N0=log((BER/0.52-C)/(R^S*B*log(R)))/(0.52*log(R)); 
+  
+  N0 <- ifelse(N0 < 0, 0, N0)
+  N0 <- ifelse(N0 > 225, 225, N0)
+  
+  return(N0)
+}
+
+N0_K <- lapply(1:length(K_optN_out),
+               function (z)
+                 lapply(1:nrow(KrK_df[[z]]),
+                        function (x)
+                          N0_application_K(KrK_df[[z]][x,c("meanK")])))
+
+
+
+
+```
+
+# Plot optimum fertilizer as raster
+
+```{r, echo = F, warning = F}
+
+xydf_list <- list(P_df, ST_df, T2B_df, K6_df)
+
+
+N0_K_df <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               N0 = do.call(rbind, N0_K[[z]])))
+
+
+
+N0_r <- lapply(1:length(xydf_list),
+               function (z)
+                 rasterFromXYZ(data.frame(x = xydf_list[[z]][,c("x")],
+                                          y = xydf_list[[z]][,c("y")],
+                                          N0 = do.call(rbind, N0_K[[z]])),
+                               crs = "+init=epsg:27700"))
+
+
+optK_df <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               optK = do.call(rbind, K_optN_out[[z]])))
+
+optK_r <- lapply(1:length(xydf_list),
+                 function (z)
+                   rasterFromXYZ(data.frame(x = xydf_list[[z]][,c("x")],
+                                            y = xydf_list[[z]][,c("y")],
+                                            optK = do.call(rbind, K_optN_out[[z]])),
+                                 crs = "+init=epsg:27700"))
+
+
+# Divide the expected loss by the area of the specific field
+
+# Compute area in hectares
+area_lst <- lapply(1:length(optK_r),
+                   function (i)
+                     (dim(optK_r[[i]])[1]*dim(optK_r[[i]])[2]*2)/10000)
+
+# Write data.frames of expected loss
+K_ExL_r <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               ExL = do.call(rbind, K_ExL_out[[z]])))
+
+# Sum expected loss and divide by the area in hectares
+total_ExL_K <- vector("list", length(K_ExL_r))
+for (i in 1:length(K_ExL_r)){
+  total_ExL_K[[i]] <- (sum(K_ExL_r[[i]]$ExL)/nrow(K_ExL_r[[i]]))
+  print((sum(K_ExL_r[[i]]$ExL)/nrow(K_ExL_r[[i]])))
+}
+
+
+# Sum fertilizer used (field basis) for F_opt and divide by area
+total_Fert_K <- vector("list", length(optK_df))
+for (i in 1:length(optK_df)){
+  total_Fert_K[[i]] <- (sum(optK_df[[i]]$optK)/nrow(optK_df[[i]]))
+  print((sum(optK_df[[i]]$optK)/nrow(optK_df[[i]])))
+}
+
+# Fertilizer (field basis) for F_0
+total_Fert_N0_K <- vector("list", length(N0_K_df))
+for (i in 1:length(N0_K_df)){
+  total_Fert_N0_K[[i]] <- (sum(N0_K_df[[i]]$N0)/nrow(N0_K_df[[i]]))
+  print((sum(N0_K_df[[i]]$N0)/nrow(N0_K_df[[i]])))
+}
+
+
+# Write expected loss to raster
+K_ExL <- lapply(1:length(K_ExL_r),
+                function (z)
+                  rasterFromXYZ(K_ExL_r[[z]],
+                                crs = "+init=epsg:27700"))
+
+
+cols <- colorRampPalette(c("slategray4","slategray3","slategray2",
+                           "slategray1",
+                           "coral1", "coral2", "coral3"))
+
+names_list2 <- c("Field 1", "Field 2", "Field 3","Field 4")
+
+F0_r_names <- c(rep(expression(paste(F[0]," (kg / ha)")),4))
+FE_r_names <- c(rep(expression(paste(F[opt]," (kg / ha)")),4))
+L_K_names <- c(rep(expression(paste(E,"[",italic("L"),
+                                    "(",italic("F"[E]),
+                                    ")] (? / ha)")),4))
+
+
+# Only Fopt and F0
+F0_label2 <- c("A.", "C.", "E.", "G.")
+FE_label2 <- c("B.", "D.", "F.", "H.")
+
+list_leg <- c("FALSE", "FALSE","FALSE","TRUE")
+
+# For loop plotting
+# Panel of two columns and four rows (excluding the expected loss)
+png(filename = paste("./Plots/K_panel.png", sep = ""), 
+    height = 8, width =5, res = 400, units = "in")
+par(mfrow = c(4,2))
+par(oma = c(4, 4.5, 1.5, 0))   
+par(mar=c(1.2,0,1.2,1))
+for (j in 1:length(N0_r)){
+  plot(N0_r[[j]], 
+       #ylab = names_list2[[j]],
+       main = NULL,
+       #col = cols(100),
+       col = viridis::viridis(50),
+       npretty = 2,
+       cex.lab=1.3, 
+       legend = F,
+       zlim = c(0,225))
+  legend("topright", F0_label2[[j]], text.font = 2, bty="n")
+  plot(optK_r[[j]],
+       main = NULL,
+       col = viridis::viridis(50),
+       npretty=2,
+       yaxt = 'n',
+       ylab = NULL, 
+       xaxt = NULL,
+       axes = FALSE,
+       zlim = c(0,225),
+       legend = list_leg[[j]]
+       #legend.args = list(text = expression(paste("kg / ", ha^"-1")), side = 3)
+  )
+  Axis(side=1)
+  Axis(side = 2, labels = FALSE)
+  legend("topright", FE_label2[[j]], text.font = 2, bty="n")
+}
+mtext(expression(paste(x[1]," / m")), side = 1, outer = TRUE, line = 2, at = .5)
+mtext(expression(paste(x[2]," / m")), side = 2, outer = TRUE, line = 3)
+mtext(expression(paste(F[0]," - ",K[2],"O fertilizer")), 
+      side = 3, outer = TRUE, line = 0, at = 0.215)
+mtext(expression(paste(F[opt]," - ",K[2],"O fertilizer")), 
+      side = 3, outer = TRUE, line = 0, at = 0.715)
+dev.off()
+
+
+```
+
+
+# Boxplot of kriging predictions and its corresponding kriging variance of P and K for each field
+
+```{r, echo = F, warning = F}
+
+pred_list <- list(KrK_df, KrP_df)
+label_list <- c("K / mg~kg^-1", 
+                "P / mg~kg^-1")
+var_list <- list(list("meanK", "krigVar"),
+                 list("meanP", "krigVar"))
+type_list <- list("Kriging~predictions", "sigma[krig]^2")
+
+hline_bxplot <- data.frame(Type = rep(c("Kriging~predictions", 
+                                        "sigma[krig]^2"),2),
+                           Soil_property = rep(label_list, each = 2),
+                           Hline = c(250, "NA", 66, "NA"))
+
+hline_list <- list(list(250, 66),
+                   list("NA","NA"))
+
+linetype_list <- c("dashed", "dotted")
+
+df_boxpl_l <- lapply(1:length(pred_list),
+                     function (z)
+                       lapply(1:length(pred_list[[z]]),
+                              function (x) 
+                                lapply(1:length(type_list),
+                                       function (i) { 
+                                         data.frame(
+                                           value = pred_list[[z]][[x]][,c(var_list[[z]][[i]])],
+                                           Type = type_list[[i]],
+                                           Soil_property = label_list[[z]],
+                                           Field = names_list[[x]],
+                                           Hline = as.numeric(hline_list[[i]][[z]]),
+                                           Linetype=linetype_list[[z]])}
+                                )
+                       )
+)
+
+
+# Bind at any depth function
+depth <- function(this) ifelse(is.list(this), 1L + max(sapply(this, depth)), 0L)
+
+bind_at_any_depth <- function(l) {
+  if (depth(l) == 2) {
+    return(bind_rows(l))
+  } else {
+    l <- map_depth(l, depth(l) - 2, bind_rows)
+    bind_at_any_depth(l)
+  }
+}
+
+df_boxplt <- bind_at_any_depth(df_boxpl_l)
+
+glimpse(df_boxplt)
+
+# Write dataframe to plot horizontal lines of dose response curve range
+
+tiff(filename = "./Plots/Figure 7.tiff", width = 5.5, height = 4, units = "in", 
+     pointsize = 1/500,res = 500)
+df_boxplt %>% 
+  ggplot()+
+  geom_boxplot(aes(x=Field,y=value))+
+  facet_wrap(Type~Soil_property,
+             scales = "free_y",
+             labeller = labeller(.cols = label_parsed, 
+                                 .multi_line = FALSE))+
+  xlab(NULL)+
+  ylab(NULL)+
+  geom_hline(aes(yintercept = Hline, linetype = Linetype))+
+  scale_linetype_manual(values = c("dashed", 
+                                    "dotted"),
+                        name = expression(paste("Opt(",psi,")")),
+                        labels = c("K", "P"))
+
+dev.off()
+
+```
+# -------- Phosphorus
+
+
+```{r, echo = F, warning = F}
+
+f_Olsen_P <- function (mean_Sv, sig_v, S, FE){
+  
+  A = 142.15
+  B = -145.8
+  C = -0.776
+  R = 0.98
+  
+  sig=sig_v;
+  meanS=mean_Sv;
+  
+  # Estimate the integrated profit for F_opt (FE) 
+  
+  y=((A+B*R^((0.15*FE)+S)+C*((0.15*FE)+S))*90-(0.36*FE))*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)));
+  
+  y
+  
+}
+
+
+```
+
+# Optimize fertilizer application (P2O5) based on Expected Loss
+
+```{r, echo = F, warning = F}
+
+
+r_intgr_P <- function (mean_Sv, S, sig_v){
+  
+  R = 0.98;
+  meanS = mean_Sv;
+  sig = sig_v;
+  
+  y <- (R^S)*(1/(sqrt(2*pi)*sig)*exp(-0.5*(S-meanS)^2/(sig^2)))
+  
+  return(y)
+}
+
+
+opt_L_f <- function (S_v, sig){
+  
+  BER=0.360/90;
+  
+  A = 142.15
+  B = -145.8
+  C = -0.776
+  R = 0.98
+  
+  sig = sig;
+  sig_v = sig;
+  tmp_v <- integrate(r_intgr_P,0,120,
+                     mean_Sv = S_v,
+                     sig_v=sig)
+  
+  opt_L_N = log((BER/0.15-C)/(B*log(R)*tmp_v$value))/(0.15*log(R))
+  
+  # check whether > 120
+  opt_LN_kg_f2 <- ifelse(opt_L_N > 120, 120, opt_L_N)
+  
+  # check whether < 0
+  opt_LN_kg_f3 <- ifelse(opt_LN_kg_f2 < 0, 0, opt_LN_kg_f2)
+  
+  return(opt_LN_kg_f3)
+}
+
+
+
+optP_out <- lapply(1:length(KrP_df),
+                   function (z)
+                     lapply(1:nrow(KrP_df[[z]]),
+                            function (x)
+                              opt_L_f(KrP_df[[z]][x,c("meanP")],
+                                      sqrt(KrP_df[[z]][x,c("krigVar")]))))
+
+
+```
+
+# Compute Expected Loss based on optimum P2O5 value
+
+```{r, echo = F, warning = F}
+
+
+intgr_OlsenP <- function (S_v,sig, FE_v) {
+  
+  BER=0.360/90;
+  
+  A = 142.15
+  B = -145.8
+  C = -0.776
+  R = 0.98
+  
+  S=S_v;
+  #OPtimum P2O5
+  N0=log((BER/0.15-C)/(R^S*B*log(R)))/(0.15*log(R)); 
+  N=0:120;
+  
+  Profit=(A+B*R^((0.15*N)+S)+C*((0.15*N)+S))*90-(0.36*N);
+  
+  L=((A+B*R^((0.15*N0)+S)+C*((0.15*N0)+S))*90-0.36*N0)-Profit;
+  
+  q = integrate(f_Olsen_P,0,120, mean_Sv = S, sig_v = sig, FE = FE_v);
+  out1 <- q$value
+  out2 <- q$abs.error
+  
+  #OPtimum P2O5
+  N0=(log((BER/0.15-C)/(R^S*B*log(R)))/(0.15*log(R)));
+  
+  N0 <- ifelse(N0 > 120, 120, N0)
+  
+  N0 <- ifelse(N0 < 0, 0, N0)
+  
+  # Profit for F_0 (N0)
+  Profit=(A+B*R^((0.15*N0)+S)+C*((0.15*N0)+S))*90-(0.36*N0);
+  
+  out3 <- Profit-out1
+  
+  return(out3)
+  
+}
+
+ExL_out <- lapply(1:length(optP_out),
+                  function (z)
+                    lapply(1:nrow(KrP_df[[z]]),
+                           function (x)
+                             intgr_OlsenP(S_v = KrP_df[[z]][x,c("meanP")],
+                                          sig = sqrt(KrP_df[[z]][x,c("krigVar")]),
+                                          FE_v = optP_out[[z]][[x]])))
+
+```
+
+# Compute fertilizer based on kriging predictions without uncertainty
+
+```{r, echo = F, warning = F}
+
+N0_application_P <- function (S_v) {
+  
+  BER=0.360/90;
+  
+  A = 142.15
+  B = -145.8
+  C = -0.776
+  R = 0.98
+  
+  S=S_v;
+  #OPtimum F (F_0, i.e. N0)
+  N0=log((BER/0.15-C)/(R^S*B*log(R)))/(0.15*log(R)); 
+  
+  N0 <- ifelse(N0 < 0, 0, N0)
+  N0 <- ifelse(N0 > 120, 120, N0)
+  
+  return(N0)
+}
+
+N0_P <- lapply(1:length(optP_out),
+               function (z)
+                 lapply(1:nrow(KrP_df[[z]]),
+                        function (x)
+                          N0_application_P(KrP_df[[z]][x,c("meanP")])))
+
+
+```
+
+# Plot different optimum P2O5 fertilizer applications as raster
+
+```{r, echo = F, warning = F}
+
+N0_P_df <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               N0 = do.call(rbind, N0_P[[z]])))
+
+
+N0_r <- lapply(1:length(xydf_list),
+               function (z)
+                 rasterFromXYZ(data.frame(x = xydf_list[[z]][,c("x")],
+                                          y = xydf_list[[z]][,c("y")],
+                                          N0 = do.call(rbind, N0_P[[z]])),
+                               crs = "+init=epsg:27700"))
+
+
+optP_df <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               optP = do.call(rbind, optP_out[[z]])))
+
+
+optP_r <- lapply(1:length(xydf_list),
+                 function (z)
+                   rasterFromXYZ(data.frame(x = xydf_list[[z]][,c("x")],
+                                            y = xydf_list[[z]][,c("y")],
+                                            optP = do.call(rbind, optP_out[[z]])),
+                                 crs = "+init=epsg:27700"))
+
+# Divide the expected loss by the area of the specific field
+
+# Compute the area in hectares for each field
+area_lst <- lapply(1:length(optP_r),
+                   function (i)
+                     (dim(optP_r[[i]])[1]*dim(optP_r[[i]])[2]*2)/10000)
+
+# Compute the expected loss data frames for each field
+ExL_r <- lapply(1:length(xydf_list),
+                function (z)
+                  data.frame(x = xydf_list[[z]][,c("x")],
+                             y = xydf_list[[z]][,c("y")],
+                             ExL = do.call(rbind, ExL_out[[z]]),
+                             meanP = KrP_df[[z]][,c("meanP")],
+                             krigVar = KrP_df[[z]][,c("krigVar")]))
+
+# Sum total expected Loss (field basis) and divide by nrows
+total_ExL_P <- vector("list", length(ExL_r))
+for (i in 1:length(ExL_r)){
+  total_ExL_P[[i]] <- (sum(ExL_r[[i]]$ExL)/nrow(ExL_r[[i]]))
+  print((sum(ExL_r[[i]]$ExL)/nrow(ExL_r[[i]])))
+}
+
+
+# Total fertilizer applied VRA (field basis) / area of field
+total_Fert_P <- vector("list", length(optP_df))
+for (i in 1:length(optP_df)){
+  total_Fert_P[[i]] <- (sum(optP_df[[i]]$optP)/nrow(optP_df[[i]]))
+  print((sum(optP_df[[i]]$optP)/nrow(optP_df[[i]])))
+}
+
+# Total fertilizer applied N0 (field basis) / area of field
+total_Fert_N0_P <- vector("list", length(N0_P_df))
+for (i in 1:length(N0_P_df)){
+  total_Fert_N0_P[[i]] <- (sum(N0_P_df[[i]]$N0)/nrow(N0_P_df[[i]]))
+  print((sum(N0_P_df[[i]]$N0)/nrow(N0_P_df[[i]])))
+}
+
+# Write expected loss to raster format
+P_ExL <- lapply(1:length(ExL_r),
+                function (z)
+                  rasterFromXYZ(ExL_r[[z]],
+                                crs = "+init=epsg:27700"))
+
+
+cols <- colorRampPalette(c("slategray4","slategray3","slategray2",
+                           "slategray1",
+                           "coral1", "coral2", "coral3"))
+
+F0_r_names <- c(expression(paste(F[0]," (kg / ha)")),"NULL","NULL","NULL")
+FE_r_names <- c(expression(paste(F[opt]," (kg / ha)")),"NULL","NULL","NULL")
+L_P_names <- c(rep(expression(paste(E,"[",italic("L"),
+                                    "(",italic("F"[E]),
+                                    ")] (? / ha)")),4))
+
+
+# Plot without the expected loss (i.e. just F_0 and F_opt)
+png(filename = paste("./Plots/P_panel.png", sep = ""), 
+    height = 8, width =5, res = 400, units = "in")
+par(mfrow = c(4,2))
+par(oma = c(4, 4.5, 1.5, 0))   
+par(mar=c(1.2,0,1.2,1))
+for (j in 1:length(N0_r)){
+  plot(N0_r[[j]], 
+       #ylab = names_list2[[j]],
+       main = NULL,
+       #col = cols(100),
+       col = viridis::viridis(50),
+       npretty = 2,
+       cex.lab=1.3, 
+       legend = F)
+  legend("topright", F0_label2[[j]], text.font = 2, bty="n")
+  plot(optP_r[[j]],
+       main = NULL,
+       #col = cols(100),
+       col = viridis::viridis(50),
+       npretty=2,
+       yaxt = 'n',
+       ylab = NULL, 
+       xaxt = NULL,
+       axes = FALSE,
+       legend = list_leg[[j]])
+  Axis(side=1)
+  Axis(side = 2, labels = FALSE)
+  legend("topright", FE_label2[[j]], text.font = 2, bty="n")
+}
+mtext(expression(paste(x[1]," / m")), side = 1, outer = TRUE, line = 2, at = .5)
+mtext(expression(paste(x[2]," / m")), side = 2, outer = TRUE, line = 3)
+mtext(expression(paste(F[0], " - ", P[2], O[5]," fertilizer" )), side = 3, 
+      outer = TRUE, line = 0, at = 0.215)
+mtext(expression(paste(F[opt], " - ", P[2], O[5]," fertilizer")), side = 3, 
+      outer = TRUE, line = 0, at = 0.715)
+dev.off()
+
+
+```
+
+
+## Computing mean loss/profit functions for W sampling 
+# Phosphorus
+
+```{r, echo = F, warning = F}
+
+Cal_list <- vector("list", length(names_list))
+for (i in 1:length(names_list)){
+  Cal_list[[i]] <- data.frame(ID = Cal_l[[1]][[i]]$ID,
+                              X = Cal_l[[1]][[i]]$X,
+                              Y = Cal_l[[1]][[i]]$Y,
+                              Field = c(names_list[[i]]),
+                              P = Cal_l[[1]][[i]]$P_OLSEN,
+                              K = Cal_l[[1]][[i]]$K_NITRATE)
+}
+
+W_sub <- list(c("F16", "B64", "B29","B1","F45"),
+              c("E5R", "E11", "B26", "B16", "I"),
+              c("H5","G9","D10","B11","RB"),
+              c("G9","E7R","B10","A4R","H1"))
+
+W_df_list  <- lapply(1:length(W_sub),
+                     function (z)
+                       Cal_list[[z]][(Cal_list[[z]]$ID %in% W_sub[[z]]),])
+
+
+meanP_W <- lapply(1:length(W_df_list),
+                  function (x)
+                    mean(W_df_list[[x]]$P))
+
+
+Profit_eq <- function (A,B,C,R,N,S){
+  y <-  (A+B*R^((0.15*N)+S)+C*((0.15*N)+S))*90-(0.36*N)
+  y
+}
+
+Profit_l <- lapply(1:length(meanP_W),
+                   function (z)
+                     Profit_eq(142.15, -145.8, -0.776, 
+                               0.98, 0:120, meanP_W[[z]]))
+
+
+mean_optP_out <- lapply(1:length(meanP_W),
+                        function (z)
+                          N0_application_P(meanP_W[[z]]))
+
+meanP_W # estimated mean by W-design
+mean_optP_out
+
+# Compute the expected loss based on blanket fertilizer application
+# Only for W-design, with a rate determined by N0
+ExL_out <- lapply(1:length(KrP_df),
+                  function (z)
+                    lapply(1:nrow(KrP_df[[z]]),
+                           function (x)
+                             intgr_OlsenP(S_v = KrP_df[[z]][x,c("meanP")],
+                                          sig = sqrt(KrP_df[[z]][x,c("krigVar")]),
+                                          FE_v = mean_optP_out[[z]])))
+
+# Equally compute the data.frames based on the output
+W_ExL_r <- lapply(1:length(xydf_list),
+                  function (z)
+                    data.frame(x = xydf_list[[z]][,c("x")],
+                               y = xydf_list[[z]][,c("y")],
+                               ExL = do.call(rbind, ExL_out[[z]])))
+
+# Total expected Loss (field basis) for W-design
+W_total_ExL_P <- vector("list", length(W_ExL_r))
+for (i in 1:length(ExL_r)){
+  W_total_ExL_P[[i]] <- (sum(W_ExL_r[[i]]$ExL)/nrow(W_ExL_r[[i]]))
+  print((sum(W_ExL_r[[i]]$ExL)/nrow(W_ExL_r[[i]])))
+}
+
+mean_Fert_P <- lapply(1:length(mean_optP_out),
+                      function (z)
+                        mean_optP_out[[z]]*area_lst[[z]])
+
+mean_Fert_P # fertilizer used based on the mean of W-design
+total_Fert_P # fertilizer used based on VRA and F_opt
+
+
+```
+
+# Potassium
+
+```{r, echo = F, warning = F}
+
+meanK_W <- lapply(1:length(W_df_list),
+                  function (x)
+                    mean(W_df_list[[x]]$K))
+
+
+Profit_eq_K <- function (A,B,R,N,S){
+  y <-  (A+B*R^((0.52*N)+S))*90-(0.29*N)
+  y
+}
+
+Profit_l_K <- lapply(1:length(meanK_W),
+                     function (z)
+                       Profit_eq_K(63.3, -63.3, 0.98, 
+                                   0:225, meanK_W[[z]]))
+
+mean_optK_out <- lapply(1:length(meanK_W),
+                        function (z)
+                          N0_application_K(meanK_W[[z]]))
+
+meanK_W # Estimated means by W-design
+mean_optK_out # Optimum fertilizer based on means
+
+# Compute expected loss based on opt K fertilizer for W-design
+# Opt fertilizer for W-design does not take into account the error
+# Computation of expected loes does take into accoun the error
+K_ExL_out <- lapply(1:length(KrK_df),
+                    function (z)
+                      lapply(1:nrow(KrK_df[[z]]),
+                             function (x)
+                               intgr_AvailK(S_v = KrK_df[[z]][x,c("meanK")],
+                                            sig = sqrt(KrK_df[[z]][x,c("krigVar")]),
+                                            FE_v = mean_optK_out[[z]])))
+
+# Equally compute the data.frames based on the output
+W_ExL_K_r <- lapply(1:length(xydf_list),
+                    function (z)
+                      data.frame(x = xydf_list[[z]][,c("x")],
+                                 y = xydf_list[[z]][,c("y")],
+                                 ExL = do.call(rbind, K_ExL_out[[z]])))
+
+# Total expected Loss (field basis) for W-design
+W_total_ExL_K <- vector("list", length(W_ExL_K_r))
+for (i in 1:length(ExL_r)){
+  W_total_ExL_K[[i]] <- (sum(W_ExL_K_r[[i]]$ExL)/nrow(W_ExL_K_r[[i]]))
+  print((sum(W_ExL_K_r[[i]]$ExL)/nrow(W_ExL_K_r[[i]])))
+}
+
+W_total_ExL_K # Expected loss on field-basis based on W-design
+total_ExL_K # Expected loss with VRA based on F_opt
+
+# Fertilizer spent with optimum
+mean_Fert_K <- lapply(1:length(mean_optK_out),
+                      function (z)
+                        mean_optK_out[[z]]*area_lst[[z]])
+
+mean_Fert_K # Total fertilizer for W-design
+total_Fert_K
+
+
+```
+
+# Plot 1st  derivative NIRMIRXRF for available P and K
+
+# Plotting MSE as a function Sensor combinations before OLS regression on different spectral processing methods (i.e. Creating Suppl. Fig. 1)
+
+```{r, echo = F, warning = F}
+
+# Firstly, the separate NIR, MIR and XRF prediction across different spectral processing
+#
+
+Proc_f_name <- c("Raw spectra","Savitzky-Golay",
+                 "Standard normal variate","1st Derivative")
+
+spc_matrix_l2 <- c("NIR","MIR","XRF")
+
+Fields_name <- c("Field 1", "Field 2", "Field 3", "Field 4")
+
+# Compute data frames for separate NIR, MIR and XRF spectral matrices
+SFig1_l1 <- lapply(1:length(Pred_train_df_l2_list),
+                   function (q)
+                     lapply(1:length(Pred_train_df_l2_list[[q]]),
+                            function (z)
+                              lapply(1:length(Nr_fields),
+                                     function (j)
+                                       lapply(1:length(var_l),
+                                              function (x) 
+                                                data.frame(Measured = Cal_l[[z]][[j]][,var_ll5[[x]]],
+                                                           Predicted = Pred_train_df_l2_list[[q]][[z]][[j]][[x]][[1]],
+                                                           Soil_property = c(var_l[[x]]),
+                                                           Field = c(Fields_name[[j]]),
+                                                           Spc = c(spc_matrix_l2[[z]]),
+                                                           Proc = c(Proc_f_name[[q]])) %>% 
+                                                mutate(.,
+                                                       MSE = signif(mean((Predicted-Measured)^2),2),
+                                                       var_E = var((Predicted-Measured)),
+                                                       RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+                                                       RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+                                                       CCC = epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                                                       Bias = signif(mean(Measured - Predicted),2),
+                                                       SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+                                                       IQ = (quantile(Measured, 
+                                                                      probs = 0.75)-quantile(Measured,
+                                                                                             probs = 0.25))) %>%
+                                                mutate(.,
+                                                       RPIQ = signif((IQ/SEP),2))
+                                       ))))
+
+
+# Compute dataframes for model-averaged predictions and different processing methods
+
+OLS_f_name <- c("NIRMIR","NIRXRF","MIRXRF","NIRMIRXRF")
+
+SFig1_l2 <- lapply(1:length(OLS_Results_list),
+                   function (q)
+                     lapply(1:length(OLS_Results_list[[q]]),
+                            function (z)
+                              lapply(1:length(Nr_fields),
+                                     function (j)
+                                       lapply(1:length(var_l),
+                                              function (x) 
+                                                data.frame(Measured = Cal_l[[z]][[j]][,var_ll5[[x]]],
+                                                           Predicted = OLS_Results_list[[q]][[z]][[j]][[x]]$Fitted,
+                                                           Soil_property = c(var_l[[x]]),
+                                                           Field = c(Fields_name[[j]]),
+                                                           Spc = c(OLS_f_name[[z]]),
+                                                           Proc = c(Proc_f_name[[q]])) %>% 
+                                                mutate(.,
+                                                       MSE = signif(mean((Predicted-Measured)^2),2),
+                                                       var_E = var((Predicted-Measured)),
+                                                       RMSE = signif(sqrt(mean((Predicted-Measured)^2)),2),
+                                                       RMSE_sd = sd(sqrt((Predicted-Measured)^2)),
+                                                       CCC = epiR::epi.ccc(Predicted,Measured)$rho.c$est,
+                                                       Bias = signif(mean(Measured - Predicted),2),
+                                                       SEP = sqrt(sum((Measured-Predicted)^2)/n()),
+                                                       IQ = (quantile(Measured, 
+                                                                      probs = 0.75)-quantile(Measured,
+                                                                                             probs = 0.25))) %>%
+                                                mutate(.,
+                                                       RPIQ = signif((IQ/SEP),2))))))
+
+
+SFig1_df1 <- bind_at_any_depth(SFig1_l1)
+SFig1_df2 <- bind_at_any_depth(SFig1_l2)
+
+
+SFig1_df <- rbind(SFig1_df1,SFig1_df2)
+
+Der_df <- SFig1_df %>% 
+  filter(.,
+         Proc == "1st Derivative",
+         Spc == "NIRMIRXRF")
+
+Der_df <- Der_df %>% 
+  filter(.,
+         Soil_property == "K (mg/kg)" |
+           Soil_property == "P (mg/kg)")
+
+
+Der_df %>% 
+  group_by(., Soil_property, Field) %>% 
+  summarize(.,
+            MSE = mean(MSE))
+
+FacetLims <- Der_df %>%
+  dplyr::group_by(.,Soil_property,Field) %>%
+  dplyr::summarize(min = min(Measured, Predicted),
+                   max = max(Measured, Predicted)) %>%
+  gather(.,range, Measured, -Soil_property,-Field) %>%
+  dplyr::mutate(Predicted = Measured, range = NULL)
+
+png("./Plots/Supplementary Figure 1.png", width = 4, height = 7, units = "in", res = 400)
+ggplot(Der_df,
+              aes(Measured,Predicted))+
+    geom_point()+
+    geom_abline(intercept = 0, slope = 1)+
+    xlab(paste('Measured'))+
+    ylab(paste('Predicted'))+
+    facet_wrap(Field~Soil_property,
+               scales = "free",
+               ncol = 2,
+               labeller = label_wrap_gen(multi_line=FALSE))+
+    geom_blank(data = FacetLims)+
+    geom_text(x = -Inf, y = Inf, 
+              label = paste("MSE :", 
+                            signif(Der_df[,c("MSE")], 2)), 
+              parse = T, hjust = 0, vjust = 1.25, size = 3, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+              label = paste("CCC :", 
+                            signif(Der_df[,c("CCC")], 2)), 
+              parse = T, hjust = 0, vjust = 2.5, size = 3, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+              label = paste("Bias :", 
+                            signif(Der_df[,c("Bias")], 2)), 
+              parse = T, hjust = 0, vjust = 3.85, size = 3, color = "black")+
+    geom_text(x = -Inf, y = Inf, 
+              label = paste("RPIQ :", 
+                            signif(Der_df[,c("RPIQ")], 2)), 
+              parse = T, hjust = 0, vjust = 4.7, size = 3, color = "black")
+dev.off()
+
+```
+
